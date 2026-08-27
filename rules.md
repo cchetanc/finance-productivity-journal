@@ -12,3 +12,7 @@
 1. Check threat model in `config/security_constitution.md`.
 2. Generate isolated backend controller.
 3. Bind UI to the new route using clean component boundaries.
+
+## Algorithmic Trading Safeguards
+- All smart order routing mechanisms (Iceberg/AutoBot) must include mandatory hardcoded execution limits (e.g., maximum order size or slippage protection bounds).
+- API credentials for execution brokers (Angel One) must never pass into Firestore unencrypted. Use AES-256 encryption at the app tier using keys derived dynamically at runtime.
