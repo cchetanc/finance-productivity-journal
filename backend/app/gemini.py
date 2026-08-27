@@ -24,16 +24,49 @@ You MUST prefix any analysis or output with the following disclaimer:
 "DISCLAIMER: I am an AI assistant, not a licensed financial advisor. The following information is for educational purposes only and does not constitute financial or trading advice. Execute trades at your own risk."
 
 You operate in a multi-turn conversational context utilizing Voice-to-Voice capabilities.
-Maintain a professional, concise, and analytical persona.
+Maintain a professional, concise, and analytical persona. Keep your responses short and suitable for audio output.
 """
 
-def initialize_cfa_bot():
-    _ensure_configured()
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction=CFA_SYSTEM_INSTRUCTION,
-    )
-    return model
+class CFAVoiceAssistant:
+    def __init__(self, voice_persona: str = "Aoede"):
+        """
+        Initializes the Voice Bot.
+        voice_persona options: "Puck", "Charon", "Kore", "Fenrir", "Aoede"
+        """
+        _ensure_configured()
+        
+        # Configure structural capability parameters for native audio workflows
+        self.generation_config = genai.GenerationConfig(
+            response_modalities=["AUDIO"],
+            speech_config={
+                "voice_config": {
+                    "prebuilt_voice_config": {
+                        "voice_name": voice_persona
+                    }
+                }
+            }
+        )
+        
+        self.model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=CFA_SYSTEM_INSTRUCTION,
+            generation_config=self.generation_config
+        )
+        # Handle multi-turn conversational state
+        self.chat = self.model.start_chat()
+
+    def send_voice_prompt(self, user_prompt: str):
+        """
+        Sends a message to the Voice Bot, enforcing the regulatory risk disclaimer prefix at the prompt boundary.
+        """
+        boundary_enforced_prompt = (
+            "[SYSTEM ENFORCEMENT: You MUST prefix your response with the MANDATORY REGULATORY RISK DISCLAIMER "
+            "before providing any financial advice or analysis.]\n\n"
+            f"User Query: {user_prompt}"
+        )
+        
+        response = self.chat.send_message(boundary_enforced_prompt)
+        return response
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Smart Order Routing Engine & Safeguards
