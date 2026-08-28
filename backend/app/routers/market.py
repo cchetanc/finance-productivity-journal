@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from ..gemini import analyze_indian_market_news, SmartOrderRouter, batch_analyze_headlines
+import base64
+from ..gemini import analyze_indian_market_news, SmartOrderRouter, batch_analyze_headlines, CFAMultiAgentBot
 from ..sentiment import batch_classify_headlines
 from ..auth import get_current_user_uid
 from ..database import get_broker_config, save_trade_execution
@@ -11,6 +12,13 @@ router = APIRouter(prefix="/api/market", tags=["Market"])
 
 class NewsPayload(BaseModel):
     text: str
+
+class VoicePayload(BaseModel):
+    prompt: str = ""
+    audio_in_base64: str = None
+    persona: str = "Aoede"
+    session_id: str = "default"
+    mode: str = "TEXT" # TEXT or VOICE
 
 
 class TradePayload(BaseModel):
@@ -67,6 +75,42 @@ def analyze_news(payload: NewsPayload):
     """
     signals = analyze_indian_market_news(payload.text)
     return {"signals": signals}
+
+
+voice_sessions = {}
+
+@router.post("/voice")
+def ask_voice_bot(payload: VoicePayload):
+    """
+    Interacts with the CFA Voice Bot via Voice-to-Voice.
+    Returns base64 encoded audio (Ogg format) and optional text payload.
+    """
+    key = f"{payload.session_id}_{payload.persona}"
+    if key not in voice_sessions:
+        voice_sessions[key] = CFAMultiAgentBot(voice_persona=payload.persona)
+    
+    assistant = voice_sessions[key]
+    try:
+        audio_bytes = base64.b64decode(payload.audio_in_base64) if payload.audio_in_base64 else None
+        
+        audio_response, text_resp = assistant.process_query(
+            user_prompt=payload.prompt, 
+            audio_bytes=audio_bytes, 
+            mode=payload.mode
+        )
+        audio_b64 = None
+        
+        if payload.mode.upper() == "VOICE" and audio_response and audio_response.candidates:
+            for part in audio_response.candidates[0].content.parts:
+                if hasattr(part, "inline_data") and part.inline_data:
+                    audio_b64 = base64.b64encode(part.inline_data.data).decode("utf-8")
+                    
+        return {"audio_base64": audio_b64, "text": text_resp}
+    except Exception as e:
+        print(f"Voice Bot Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Voice generation failed")
 
 
 @router.post("/trade")

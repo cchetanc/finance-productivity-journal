@@ -250,16 +250,16 @@ for group_name, names in index_groups.items():
         pct_str  = f"({pct:+.2f}%)"
 
         group_tiles += f"""
-<div style="background:{c_bg};border:1px solid {c_bdr};border-radius:5px;padding:12px 14px;min-width:0;">
-    <div style="font-size:10px;color:#8b949e;font-weight:600;margin-bottom:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{name}</div>
-    <div style="font-size:15px;font-weight:700;color:#e6edf3;font-family:'JetBrains Mono',monospace;margin-bottom:4px;white-space:nowrap;">{price}</div>
-    <div style="font-size:10.5px;color:{c_col};font-family:'JetBrains Mono',monospace;white-space:nowrap;">{arrow} {chg_str} {pct_str}</div>
+<div style="background:{c_bg};border:1px solid {c_bdr};border-radius:5px;padding:8px 10px;min-width:0;">
+    <div style="font-size:9px;color:#8b949e;font-weight:600;margin-bottom:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{name}</div>
+    <div style="font-size:13px;font-weight:700;color:#e6edf3;font-family:'JetBrains Mono',monospace;margin-bottom:3px;white-space:nowrap;">{price}</div>
+    <div style="font-size:9px;color:{c_col};font-family:'JetBrains Mono',monospace;white-space:nowrap;">{arrow} {chg_str} {pct_str}</div>
 </div>"""
 
     tiles_html += f"""
-<div style="margin-bottom:14px;">
-    <div style="font-size:9.5px;color:#484f58;font-weight:700;letter-spacing:1px;text-transform:uppercase;padding-bottom:6px;margin-bottom:8px;border-bottom:1px solid #1c2128;">{group_name}</div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">{group_tiles}</div>
+<div style="margin-bottom:12px;">
+    <div style="font-size:9px;color:#484f58;font-weight:700;letter-spacing:1px;text-transform:uppercase;padding-bottom:4px;margin-bottom:6px;border-bottom:1px solid #1c2128;">{group_name}</div>
+    <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;">{group_tiles}</div>
 </div>"""
 
 if not tiles_html:
@@ -272,3 +272,197 @@ components.html(f"""
     <div style="font-size:10px;color:#3d4451;margin-top:8px;font-style:italic;">Via Yahoo Finance · ~15 min delay · NSE · BSE · NASDAQ · S&amp;P · DJI</div>
 </div>
 """, height=520)
+
+# ── FLOATING CFA VOICE BOT ───────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* Floating Bot Button Styling */
+[data-testid="stPopover"] {
+    position: fixed !important;
+    top: 24px !important;
+    right: 24px !important;
+    z-index: 999999 !important;
+}
+[data-testid="stPopover"] > button {
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 100%) !important;
+    border: 1px solid #30363d !important;
+    border-radius: 8px !important;
+    color: #e6edf3 !important;
+    padding: 8px 16px !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.8) !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 8px !important;
+    transition: all 0.2s ease !important;
+    width: auto !important;
+    height: auto !important;
+}
+[data-testid="stPopover"] > button:hover {
+    background: #1f242c !important;
+    border-color: #58a6ff !important;
+    color: #58a6ff !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 12px 28px rgba(0,0,0,0.9) !important;
+}
+/* Popover Window Styling */
+[data-testid="stPopoverBody"] {
+    width: 380px !important;
+    max-height: 600px !important;
+    height: 80vh !important;
+    background: #0d1117 !important;
+    border: 1px solid #30363d !important;
+    border-radius: 12px !important;
+    padding: 16px !important;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.95) !important;
+    overflow-y: auto !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+with st.popover("🤖 my Finance Analyst", use_container_width=False):
+    hdr_c1, hdr_c2 = st.columns([6, 1])
+    with hdr_c1:
+        st.markdown('<div style="font-size:12px;font-weight:900;letter-spacing:1px;color:#8b949e;text-transform:uppercase;margin-top:8px;display:flex;align-items:center;gap:8px;"><span style="font-size:16px;">🤖</span> CFA Assistant</div>', unsafe_allow_html=True)
+    with hdr_c2:
+        if st.button("➖", key="minimize_chat", help="Minimize"):
+            st.rerun()
+    st.markdown('<div style="border-bottom:1px solid #21262d;margin-bottom:12px;padding-bottom:4px;"></div>', unsafe_allow_html=True)
+    
+    mode = st.radio("Response Mode", ["Chat", "Voice"], horizontal=True, key="bot_mode_toggle")
+    mode_val = "TEXT" if mode == "Chat" else "VOICE"
+    
+    if mode == "Voice":
+        persona = st.selectbox("Voice Persona", ["Aoede", "Puck", "Charon", "Kore", "Fenrir"], key="bot_persona_select")
+    else:
+        persona = "Aoede" # Default fallback
+        st.markdown("<div style='height:70px;'></div>", unsafe_allow_html=True) # Spacer
+
+    if "voice_history" not in st.session_state:
+        st.session_state.voice_history = []
+
+    components.html("""
+    <script>
+    const parent = window.parent.document;
+    let retries = 0;
+    function addMicButton() {
+        const chatInputArea = parent.querySelector('[data-testid="stChatInput"]');
+        if (!chatInputArea) {
+            if (retries < 20) {
+                retries++;
+                setTimeout(addMicButton, 500);
+            }
+            return;
+        }
+        if (parent.querySelector('#custom-mic-btn')) return;
+        
+        const micBtn = parent.createElement('button');
+        micBtn.id = 'custom-mic-btn';
+        micBtn.innerHTML = '🎤';
+        micBtn.style.background = 'transparent';
+        micBtn.style.border = 'none';
+        micBtn.style.color = '#8b949e';
+        micBtn.style.fontSize = '20px';
+        micBtn.style.cursor = 'pointer';
+        micBtn.style.position = 'absolute';
+        micBtn.style.right = '45px';
+        micBtn.style.top = '50%';
+        micBtn.style.transform = 'translateY(-50%)';
+        micBtn.style.zIndex = '100';
+        
+        const wrapper = chatInputArea.querySelector('div');
+        if(wrapper) {
+            wrapper.style.position = 'relative';
+            wrapper.appendChild(micBtn);
+        }
+
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition || window.parent.SpeechRecognition || window.parent.webkitSpeechRecognition;
+        if (!SR) {
+            micBtn.title = "Voice not supported in this browser";
+            return;
+        }
+        
+        const recognition = new SR();
+        recognition.lang = 'en-IN';
+        recognition.interimResults = false;
+        
+        micBtn.addEventListener('click', () => {
+            micBtn.innerHTML = '🔴';
+            recognition.start();
+        });
+        
+        recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            const textarea = chatInputArea.querySelector('textarea');
+            if (textarea) {
+                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+                nativeInputValueSetter.call(textarea, transcript);
+                textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                
+                setTimeout(() => {
+                    textarea.dispatchEvent(new KeyboardEvent('keydown', {
+                        key: 'Enter',
+                        code: 'Enter',
+                        keyCode: 13,
+                        which: 13,
+                        bubbles: true
+                    }));
+                }, 100);
+            }
+        };
+        recognition.onend = () => {
+            micBtn.innerHTML = '🎤';
+        };
+    }
+    addMicButton();
+    </script>
+    """, height=0, width=0)
+
+    user_query = st.chat_input("Ask your CFA Voice Assistant...", key="bot_chat_input")
+    if user_query:
+        st.session_state.voice_history.append({"role": "user", "text": user_query})
+        
+        spinner_text = "Synthesizing Audio..." if mode_val == "VOICE" else "Generating response..."
+        with st.spinner(spinner_text):
+            try:
+                resp = requests.post(f"{BACKEND_URL}/api/market/voice", json={
+                    "prompt": user_query,
+                    "persona": persona,
+                    "session_id": "demo_session_1",
+                    "mode": mode_val
+                }, timeout=45)
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    st.session_state.voice_history.append({
+                        "role": "cfa", 
+                        "text": data.get("text", "Audio response received."),
+                        "audio": data.get("audio_base64")
+                    })
+                else:
+                    st.error(f"Error: {resp.status_code}")
+            except Exception as e:
+                st.error(f"Connection failed: {e}")
+
+    # Display chat history within the popover
+    st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
+    for msg in st.session_state.voice_history:
+        if msg["role"] == "user":
+            st.markdown(f'''
+            <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
+                <div style="background:#1f242c;border:1px solid #30363d;padding:10px 14px;border-radius:12px 12px 2px 12px;max-width:85%;">
+                    <div style="font-size:13px;color:#e6edf3;line-height:1.5;">{msg["text"]}</div>
+                </div>
+            </div>
+            ''', unsafe_allow_html=True)
+        elif msg["role"] == "cfa":
+            st.markdown(f'''
+            <div style="display:flex;justify-content:flex-start;margin-bottom:12px;">
+                <div style="background:rgba(63,185,80,0.08);border:1px solid rgba(63,185,80,0.3);padding:10px 14px;border-radius:12px 12px 12px 2px;max-width:90%;">
+                    <div style="font-size:13px;color:#c9d1d9;line-height:1.6;margin-bottom:{'8px' if msg.get('audio') else '0'};">{msg["text"]}</div>
+            ''', unsafe_allow_html=True)
+            if msg.get("audio"):
+                st.markdown(f'<audio controls style="width:100%;height:36px;border-radius:4px;"><source src="data:audio/ogg;base64,{msg["audio"]}" type="audio/ogg"></audio>', unsafe_allow_html=True)
+            st.markdown('</div></div>', unsafe_allow_html=True)

@@ -18,8 +18,6 @@ def access_secret_version(secret_id, version_id="latest"):
     payload = response.payload.data.decode("UTF-8")
     return payload
 
-def get_gemini_api_key() -> str:
-    return access_secret_version("GEMINI_API_KEY")
 
 def get_broker_credential_salt() -> str:
     """

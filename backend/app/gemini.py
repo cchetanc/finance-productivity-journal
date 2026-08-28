@@ -1,16 +1,17 @@
 import json
 import base64
 from cryptography.fernet import Fernet
-import google.generativeai as genai
-from .secrets import get_gemini_api_key, get_broker_credential_salt
+from google import genai
+from google.genai import types
+from .secrets import get_broker_credential_salt
 
-_is_configured = False
+_client = None
 
-def _ensure_configured():
-    global _is_configured
-    if not _is_configured:
-        genai.configure(api_key=get_gemini_api_key())
-        _is_configured = True
+def get_client():
+    global _client
+    if _client is None:
+        _client = genai.Client(vertexai=True, project="gen-lang-client-0048936678", location="us-central1")
+    return _client
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CFA Voice Bot
@@ -27,46 +28,63 @@ You operate in a multi-turn conversational context utilizing Voice-to-Voice capa
 Maintain a professional, concise, and analytical persona. Keep your responses short and suitable for audio output.
 """
 
-class CFAVoiceAssistant:
+from .agents import Orchestrator
+
+class CFAMultiAgentBot:
     def __init__(self, voice_persona: str = "Aoede"):
         """
-        Initializes the Voice Bot.
+        Initializes the Multi-Agent CFA Bot with a TTS model for Voice synthesis.
         voice_persona options: "Puck", "Charon", "Kore", "Fenrir", "Aoede"
         """
-        _ensure_configured()
+        self.client = get_client()
+        self.orchestrator = Orchestrator()
         
         # Configure structural capability parameters for native audio workflows
-        self.generation_config = genai.GenerationConfig(
+        self.voice_model_name = "gemini-2.5-flash-preview-tts"
+        self.voice_config = types.GenerateContentConfig(
             response_modalities=["AUDIO"],
-            speech_config={
-                "voice_config": {
-                    "prebuilt_voice_config": {
-                        "voice_name": voice_persona
-                    }
-                }
-            }
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=voice_persona
+                    )
+                )
+            )
         )
-        
-        self.model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            system_instruction=CFA_SYSTEM_INSTRUCTION,
-            generation_config=self.generation_config
-        )
-        # Handle multi-turn conversational state
-        self.chat = self.model.start_chat()
 
-    def send_voice_prompt(self, user_prompt: str):
+    def process_query(self, user_prompt: str, audio_bytes: bytes = None, mode: str = "TEXT"):
         """
-        Sends a message to the Voice Bot, enforcing the regulatory risk disclaimer prefix at the prompt boundary.
+        Routes the user prompt to the orchestrator.
+        If audio_bytes is provided, transcribes it via Gemini first.
+        If mode is VOICE, it reads the synthesized text aloud via Vertex TTS.
         """
-        boundary_enforced_prompt = (
-            "[SYSTEM ENFORCEMENT: You MUST prefix your response with the MANDATORY REGULATORY RISK DISCLAIMER "
-            "before providing any financial advice or analysis.]\n\n"
-            f"User Query: {user_prompt}"
-        )
+        if audio_bytes:
+            audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/webm")
+            transcribe_resp = self.client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[audio_part, "Transcribe the following audio accurately into text. Return ONLY the transcribed text."]
+            )
+            user_prompt = transcribe_resp.text.strip()
+            print(f"Transcribed audio: {user_prompt}")
+
+        # 1. Gather expert analysis
+        raw_answer = self.orchestrator.process_query(user_prompt)
         
-        response = self.chat.send_message(boundary_enforced_prompt)
-        return response
+        # 2. Enforce regulatory disclaimer
+        disclaimer = "DISCLAIMER: I am an AI assistant, not a licensed financial advisor. The following information is for educational purposes only and does not constitute financial or trading advice. Execute trades at your own risk."
+        final_text = f"{disclaimer}\n\n{raw_answer}"
+        
+        # 3. Handle modalities
+        if mode.upper() == "VOICE":
+            audio_prompt = f"Please read the following text exactly as written, maintaining a professional tone:\n\n{final_text}"
+            audio_response = self.client.models.generate_content(
+                model=self.voice_model_name,
+                contents=audio_prompt,
+                config=self.voice_config
+            )
+            return audio_response, final_text
+        else:
+            return None, final_text
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Smart Order Routing Engine & Safeguards
@@ -122,7 +140,7 @@ def batch_analyze_headlines(headlines: list) -> dict:
     """
     if not headlines:
         return {}
-    _ensure_configured()
+    client = get_client()
 
     titles_block = "\n".join([f"{i+1}. {h}" for i, h in enumerate(headlines)])
     prompt = f"""Analyze the following {len(headlines)} financial news headlines for Indian equity market sentiment.
@@ -134,12 +152,13 @@ Return a JSON array with exactly {len(headlines)} objects in the same order, eac
 Headlines:
 {titles_block}"""
 
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        generation_config=genai.GenerationConfig(response_mime_type="application/json")
-    )
+    config = types.GenerateContentConfig(response_mime_type="application/json")
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=config
+        )
         data = json.loads(response.text)
         result = {}
         for item in (data if isinstance(data, list) else []):
@@ -172,13 +191,17 @@ def analyze_indian_market_news(raw_news_payload: str) -> list:
     """
     Analyzes Indian market news using Gemini and returns a structured JSON payload of market signals.
     """
-    _ensure_configured()
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
+    client = get_client()
+    config = types.GenerateContentConfig(
         system_instruction=ANALYST_SYSTEM_INSTRUCTION,
-        generation_config=genai.GenerationConfig(response_mime_type="application/json")
+        response_mime_type="application/json"
     )
-    response = model.generate_content(raw_news_payload)
+    
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=raw_news_payload,
+        config=config
+    )
     try:
         data = json.loads(response.text)
         return data if isinstance(data, list) else [data]
