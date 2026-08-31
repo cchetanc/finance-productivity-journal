@@ -1,0 +1,1 @@
+# trading module: broker abstraction, algo strategies, execution engine

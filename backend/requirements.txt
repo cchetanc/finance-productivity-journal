@@ -4,11 +4,21 @@ firebase-admin==6.9.0
 google-cloud-secret-manager==2.30.0
 google-cloud-firestore==2.29.0
 pydantic==2.13.4
-google-genai==1.75.0
+groq==1.7.0
+google-genai==2.20.0
 cryptography==50.0.1
 yfinance==1.7.0
+requests==2.32.3
 feedparser==6.0.14
-google-adk==1.14.0
+transformers==4.46.3
+torch==2.5.1
 python-dotenv==1.0.1
-mcp==1.29.1
 streamlit==1.62.0
+google-cloud-speech
+google-cloud-texttospeech
+
+# Trading / algo execution
+smartapi-python==1.5.5
+pyotp==2.9.0
+logzero==1.7.0
+websocket-client==1.8.0

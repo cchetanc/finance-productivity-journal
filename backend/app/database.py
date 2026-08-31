@@ -64,6 +64,26 @@ def save_market_signals(uid: str, signals_payload: list):
     batch.commit()
     return saved_ids
 
+def get_algo_executions_collection(uid: str):
+    """
+    Returns the algo executions collection reference for a user.
+    Path: /users/{uid}/algo_executions/{executionId}
+    """
+    return db.collection("users").document(uid).collection("algo_executions")
+
+
+def list_algo_executions(uid: str, limit: int = 50):
+    """
+    Returns the user's most recent algo executions, newest first.
+    """
+    query = (
+        get_algo_executions_collection(uid)
+        .order_by("created_at", direction=firestore.Query.DESCENDING)
+        .limit(limit)
+    )
+    return [{"id": doc.id, **doc.to_dict()} for doc in query.stream()]
+
+
 def save_trade_execution(uid: str, execution_data: dict):
     """
     Saves a completed trade execution receipt to Firestore.
