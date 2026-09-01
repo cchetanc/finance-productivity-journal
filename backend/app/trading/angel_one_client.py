@@ -75,12 +75,28 @@ class AngelOneClient(BrokerClient):
         block the event loop."""
 
         def _login():
+            import urllib.request
+            import json
+            
             conn = SmartConnect(api_key=self._api_key)
             totp = pyotp.TOTP(self._totp_secret).now()
             session = conn.generateSession(self._client_code, self._pin, totp)
             if not session.get("status"):
                 raise BrokerError(f"Angel One login failed: {session.get('message')}")
             feed_token = conn.getfeedToken()
+            
+            # Fetch the instrument master list during connect to populate the token cache
+            logger.info("Fetching Angel One instrument master...")
+            req = urllib.request.Request(
+                "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json",
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req) as resp:
+                data = json.load(resp)
+                for item in data:
+                    self._instrument_tokens[f"{item['exch_seg']}:{item['symbol']}"] = item["token"]
+            logger.info(f"Loaded {len(self._instrument_tokens)} instrument tokens.")
+            
             return conn, feed_token
 
         try:

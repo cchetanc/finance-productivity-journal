@@ -22,6 +22,68 @@ def get_journals_collection(uid: str):
     """
     return db.collection("users").document(uid).collection("journals")
 
+
+def append_journal_turn(uid: str, journal_id: str, role: str, text: str) -> list:
+    """
+    Appends one {"role", "text"} turn to a journal's stored conversation and
+    returns the updated, full message history. Path stays isolated under
+    /users/{uid}/journals/{journalId} per the Data Isolation Matrix in
+    docs/architecture_blueprint.md.
+    """
+    import datetime
+    doc_ref = get_journal_ref(uid, journal_id)
+    doc = doc_ref.get()
+    existing = doc.to_dict() if doc.exists else {}
+    messages = existing.get("messages", [])
+    messages.append({
+        "role": role,
+        "text": text,
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+    })
+    doc_ref.set({**existing, "messages": messages}, merge=True)
+    return messages
+
+
+def list_journals(uid: str, limit: int = 50) -> list:
+    """
+    Returns the user's journals, newest first, with a lightweight preview
+    (title, summary, message count) rather than the full message history —
+    keeps the list view cheap.
+    """
+    query = (
+        get_journals_collection(uid)
+        .order_by("summary_updated_at", direction=firestore.Query.DESCENDING)
+        .limit(limit)
+    )
+    try:
+        docs = list(query.stream())
+    except Exception:
+        # summary_updated_at may not exist yet on older docs / an unindexed
+        # field — fall back to an unordered read rather than erroring out.
+        docs = list(get_journals_collection(uid).limit(limit).stream())
+    out = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        out.append({
+            "id": doc.id,
+            "title": data.get("title"),
+            "summary": data.get("summary"),
+            "message_count": len(data.get("messages", [])),
+        })
+    return out
+
+
+def save_journal_summary(uid: str, journal_id: str, summary: str):
+    """
+    Writes the background-worker-generated summary onto the journal doc, per
+    the 'Summarization Process' step in docs/architecture_blueprint.md.
+    """
+    import datetime
+    get_journal_ref(uid, journal_id).set(
+        {"summary": summary, "summary_updated_at": datetime.datetime.utcnow().isoformat()},
+        merge=True,
+    )
+
 def get_trade_ref(uid: str, trade_id: str):
     """
     Returns a document reference for a specific trade.
@@ -79,6 +141,19 @@ def list_algo_executions(uid: str, limit: int = 50):
     query = (
         get_algo_executions_collection(uid)
         .order_by("created_at", direction=firestore.Query.DESCENDING)
+        .limit(limit)
+    )
+    return [{"id": doc.id, **doc.to_dict()} for doc in query.stream()]
+
+
+def list_trades(uid: str, limit: int = 100):
+    """
+    Returns the user's most recent manually-placed order receipts (i.e. from
+    POST /api/trading/orders — not algo executions), newest first.
+    """
+    query = (
+        get_trades_collection(uid)
+        .order_by("timestamp", direction=firestore.Query.DESCENDING)
         .limit(limit)
     )
     return [{"id": doc.id, **doc.to_dict()} for doc in query.stream()]

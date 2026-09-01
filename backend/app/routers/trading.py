@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from ..auth import get_current_user_uid
-from ..database import db, list_algo_executions, save_trade_execution
+from ..database import db, list_algo_executions, list_trades, save_trade_execution
 from ..trading.algos import AlgoParams, AlgoType
 from ..trading.angel_one_client import AngelOneClient
 from ..trading.broker_base import BrokerError, OrderRequest, OrderSide, OrderType
@@ -16,8 +16,19 @@ from ..trading.paper_broker import PaperBrokerClient
 logger = logging.getLogger("trading.router")
 router = APIRouter(prefix="/api/trading", tags=["Trading"])
 
-# Paper trading needs no credentials, so it's always available.
-_paper_engine = ExecutionEngine(broker=PaperBrokerClient())
+def _persist_execution(execution):
+    ref = (
+        db.collection("users").document(execution.uid)
+        .collection("algo_executions").document(execution.execution_id)
+    )
+    ref.set(execution.to_dict(), merge=True)
+
+
+# Paper trading needs no credentials, so it's always available. It's also
+# given the same persist_fn as the live engine so PAPER algo runs show up
+# in the day's trade log (GET /api/trading/algo) even after an instance
+# restart, not just for the lifetime of this process.
+_paper_engine = ExecutionEngine(broker=PaperBrokerClient(), persist_fn=_persist_execution)
 
 # The live engine wraps a single Angel One account, sourced entirely from
 # Secret Manager (see trading/live_config.py) — never from a request body.
@@ -26,14 +37,6 @@ _paper_engine = ExecutionEngine(broker=PaperBrokerClient())
 # a single Cloud Run instance; for horizontal scaling, back it with the
 # durable-queue approach noted there.
 _live_engine: ExecutionEngine | None = None
-
-
-def _persist_execution(execution):
-    ref = (
-        db.collection("users").document(execution.uid)
-        .collection("algo_executions").document(execution.execution_id)
-    )
-    ref.set(execution.to_dict(), merge=True)
 
 
 async def _get_live_engine() -> ExecutionEngine:
@@ -117,8 +120,9 @@ async def place_order(body: PlaceOrderRequest, uid: str = Depends(get_current_us
         raise HTTPException(status_code=502, detail=str(e)) from e
 
     trade_id = save_trade_execution(uid, {
-        "symbol": body.symbol, "side": body.side.value, "quantity": body.quantity,
-        "order_type": body.order_type.value, "mode": body.mode,
+        "symbol": body.symbol, "exchange": body.exchange, "side": body.side.value,
+        "quantity": body.quantity, "order_type": body.order_type.value,
+        "limit_price": body.limit_price, "mode": body.mode,
         "broker_order_id": result.broker_order_id, "status": result.status.value,
     })
     return {"trade_id": trade_id, "broker_order_id": result.broker_order_id, "status": result.status.value}
@@ -173,7 +177,7 @@ async def start_algo(body: StartAlgoRequest, uid: str = Depends(get_current_user
     engine = await _get_live_engine() if body.mode == "LIVE" else _paper_engine
     params = _params_from_request(body)
     try:
-        execution = await engine.start(uid, body.algo_type, params)
+        execution = await engine.start(uid, body.algo_type, params, mode=body.mode)
     except Exception as e:  # noqa: BLE001 - includes RiskLimitError
         raise HTTPException(status_code=400, detail=str(e)) from e
     return execution.to_dict()
@@ -204,6 +208,13 @@ async def stop_algo(execution_id: str, mode: str = "PAPER", uid: str = Depends(g
 @router.get("/algo")
 def get_algo_history(uid: str = Depends(get_current_user_uid)):
     return list_algo_executions(uid)
+
+
+@router.get("/orders")
+def get_order_history(uid: str = Depends(get_current_user_uid)):
+    """Manual (non-algo) order receipts, newest first — combine with
+    /api/trading/algo on the frontend to build a full trade log."""
+    return list_trades(uid)
 
 
 @router.get("/positions")

@@ -50,6 +50,73 @@ STOCKS_COLLECTION = "screener_stocks"
 META_DOC = db.collection("screener_meta").document("state")
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FIELD CATALOG — single source of truth for "what is this column, where does
+# it come from, and when can it change". `source` is "pulled" (straight off
+# yfinance .info), "calculated" (computed here, formula given), or
+# "unavailable" (no free structured source — see module docstring). `refresh`
+# is how often the underlying number can realistically move. Every refresh
+# pass re-pulls .info/.financials/.balance_sheet/.cashflow/
+# .quarterly_financials fresh from Yahoo, so once a company files a new
+# quarter/annual result and Yahoo ingests it, the NEXT refresh pass
+# automatically recomputes every "calculated" field off the new statement —
+# no separate "wait for results day" logic is needed.
+FIELD_CATALOG: dict = {
+    "market_cap":                  {"source": "pulled",      "refresh": "daily"},
+    "current_price":                {"source": "pulled",      "refresh": "real_time"},
+    "pe_ratio":                     {"source": "pulled",      "refresh": "daily",     "fallback_formula": "Market Cap / Net Income"},
+    "forward_pe":                   {"source": "pulled",      "refresh": "quarterly"},
+    "peg_ratio":                    {"source": "pulled",      "refresh": "quarterly"},
+    "pb_ratio":                     {"source": "pulled",      "refresh": "daily",     "fallback_formula": "Market Cap / Total Equity"},
+    "ev_ebitda":                    {"source": "pulled",      "refresh": "quarterly", "fallback_formula": "(Market Cap + Total Debt - Cash) / EBITDA"},
+    "ps_ratio":                     {"source": "pulled",      "refresh": "quarterly"},
+    "roe":                          {"source": "pulled",      "refresh": "quarterly", "fallback_formula": "Net Income / Total Equity"},
+    "roce":                         {"source": "calculated",  "refresh": "annual",    "formula": "EBIT / (Total Assets - Current Liabilities)"},
+    "net_profit_margin":            {"source": "pulled",      "refresh": "quarterly", "fallback_formula": "Net Income / Revenue"},
+    "opm":                          {"source": "pulled",      "refresh": "quarterly", "fallback_formula": "EBIT / Revenue"},
+    "eps_growth":                   {"source": "pulled",      "refresh": "quarterly"},
+    "revenue_growth_yoy":           {"source": "pulled",      "refresh": "quarterly", "fallback_formula": "quarter vs. same quarter last year (if TTM figure missing)"},
+    "revenue_growth_qoq":           {"source": "calculated",  "refresh": "quarterly", "formula": "(latest quarter revenue - prior quarter revenue) / |prior quarter revenue|"},
+    "net_income_growth_qoq":        {"source": "calculated",  "refresh": "quarterly", "formula": "(latest quarter net income - prior quarter net income) / |prior quarter net income|"},
+    "net_income_growth_yoy":        {"source": "calculated",  "refresh": "quarterly", "formula": "(latest quarter net income - quarter 4 back) / |quarter 4 back|"},
+    "revenue_cagr":                 {"source": "calculated",  "refresh": "annual",    "formula": "CAGR of Total Revenue across all annual columns Yahoo returns"},
+    "net_income_cagr":              {"source": "calculated",  "refresh": "annual",    "formula": "CAGR of Net Income across all annual columns Yahoo returns"},
+    "eps_cagr":                     {"source": "calculated",  "refresh": "annual",    "formula": "CAGR of Diluted/Basic EPS across all annual columns Yahoo returns"},
+    "debt_to_equity":               {"source": "pulled",      "refresh": "quarterly"},
+    "current_ratio":                {"source": "pulled",      "refresh": "quarterly"},
+    "quick_ratio":                  {"source": "calculated",  "refresh": "quarterly", "formula": "(Current Assets - Inventory) / Current Liabilities"},
+    "working_capital":              {"source": "calculated",  "refresh": "quarterly", "formula": "Current Assets - Current Liabilities"},
+    "interest_coverage":            {"source": "calculated",  "refresh": "annual",    "formula": "EBIT / |Interest Expense|"},
+    "free_cash_flow":               {"source": "calculated",  "refresh": "annual",    "formula": "Operating Cash Flow - |CapEx|"},
+    "fcf_to_net_income_yield":      {"source": "calculated",  "refresh": "annual",    "formula": "Free Cash Flow / Net Income"},
+    "fcf_yield":                    {"source": "calculated",  "refresh": "annual",    "formula": "Free Cash Flow / Market Cap"},
+    "capex_trend_yoy":              {"source": "calculated",  "refresh": "annual",    "formula": "(CapEx this year - CapEx last year) / |CapEx last year|"},
+    "asset_turnover":               {"source": "calculated",  "refresh": "annual",    "formula": "Revenue / Total Assets"},
+    "inventory_turnover":           {"source": "calculated",  "refresh": "annual",    "formula": "COGS / Inventory"},
+    "days_sales_outstanding":       {"source": "calculated",  "refresh": "annual",    "formula": "(Receivables / Revenue) * 365"},
+    "dividend_yield":               {"source": "pulled",      "refresh": "quarterly"},
+    "dividend_payout_ratio":        {"source": "pulled",      "refresh": "annual"},
+    "dividend_cover":               {"source": "calculated",  "refresh": "annual",    "formula": "100 / Dividend Payout %"},
+    "insider_holding_proxy":        {"source": "pulled",      "refresh": "quarterly"},
+    "institutional_holding_proxy":  {"source": "pulled",      "refresh": "quarterly"},
+    "beta":                         {"source": "pulled",      "refresh": "quarterly"},
+    "volume_growth":                {"source": "calculated",  "refresh": "daily",     "formula": "avg daily volume (last 20 sessions) vs prior 20 sessions"},
+    "day_change_pct":               {"source": "calculated",  "refresh": "real_time", "formula": "last close / prior close - 1"},
+    "five_day_change_pct":          {"source": "calculated",  "refresh": "real_time", "formula": "last close / close 5 sessions ago - 1"},
+    "last_result_date":             {"source": "calculated",  "refresh": "quarterly", "formula": "most recent column of quarterly_financials"},
+    "next_earnings_estimate":       {"source": "calculated",  "refresh": "quarterly", "formula": "last_result_date + ~91 days"},
+    "days_since_last_result":       {"source": "calculated",  "refresh": "daily",     "formula": "today - last_result_date"},
+    "fundamental_score":            {"source": "calculated",  "refresh": "quarterly", "formula": "weighted blend of ROE, ROCE, margin, revenue CAGR, D/E (inverted), current ratio — see _fundamental_score()"},
+    "data_confidence":              {"source": "calculated",  "refresh": "quarterly", "formula": "how much of the field set actually populated for this symbol — see _data_confidence()"},
+    "promoter_holding_pct":         {"source": "unavailable", "refresh": None},
+    "promoter_pledge_pct":          {"source": "unavailable", "refresh": None},
+    "fii_dii_trajectory":           {"source": "unavailable", "refresh": None},
+    "contingent_liabilities":       {"source": "unavailable", "refresh": None},
+    "industry_tam":                 {"source": "unavailable", "refresh": None},
+    "market_share_trajectory":      {"source": "unavailable", "refresh": None},
+    "earnings_revision_trend":      {"source": "unavailable", "refresh": None},
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # UNIVERSE SOURCES
 # ─────────────────────────────────────────────────────────────────────────────
 # Public reference-data files. Neither is an official documented API — NSE
@@ -245,12 +312,15 @@ def fetch_fundamentals(yf_symbol: str) -> dict:
         "ev_ebitda": info.get("enterpriseToEbitda"),
         "ps_ratio": info.get("priceToSalesTrailing12Months"),
 
-        # Profitability
+        # Profitability & Growth (Annual & Quarterly)
         "roe": _pct(info.get("returnOnEquity")),
         "net_profit_margin": _pct(info.get("profitMargins")),
         "opm": _pct(info.get("operatingMargins")),
         "eps_growth": _pct(info.get("earningsGrowth")),
         "revenue_growth_yoy": _pct(info.get("revenueGrowth")),
+        "revenue_growth_qoq": None, # Computed in enrich
+        "net_income_growth_qoq": None, # Computed in enrich
+        "net_income_growth_yoy": None, # Computed in enrich
 
         # Leverage / liquidity
         "debt_to_equity": _de_ratio(info.get("debtToEquity")),
@@ -267,6 +337,26 @@ def fetch_fundamentals(yf_symbol: str) -> dict:
 
         "beta": info.get("beta"),
 
+        # Liquidity, payout-coverage and multi-year-CAGR fields — filled in
+        # by _enrich_from_statements below.
+        "quick_ratio": None,
+        "working_capital": None,
+        "dividend_cover": None,
+        "net_income_cagr": None,
+        "eps_cagr": None,
+        "fcf_yield": None,
+
+        # Result-cadence metadata — when this row's numbers last moved and
+        # when they're next expected to, filled in by the quarterly block
+        # below.
+        "last_result_date": None,
+        "next_earnings_estimate": None,
+        "days_since_last_result": None,
+
+        # Composite fields, computed last, after everything above is known.
+        "fundamental_score": None,
+        "data_confidence": None,
+
         # Fields with no free structured source — see module docstring.
         "roce": None,
         "promoter_holding_pct": None,
@@ -282,6 +372,10 @@ def fetch_fundamentals(yf_symbol: str) -> dict:
 
     _enrich_from_statements(t, out)
     _enrich_volume_growth(t, out)
+
+    # Composite fields computed last, once everything above is known.
+    out["fundamental_score"] = _fundamental_score(out)
+    out["data_confidence"] = _data_confidence(out)
     return out
 
 
@@ -398,9 +492,206 @@ def _enrich_from_statements(t: "yf.Ticker", out: dict) -> None:
 
         eps = _safe(lambda: t.get_earnings_history(), None)
         out["eps_growth_multi_year"] = None  # left None; needs consistent multi-year EPS series not reliably exposed for most NSE/BSE names
+        
+        # ---------------------------------------------------------------------
+        # FALLBACK CALCULATIONS FOR MISSING PRE-CALCULATED RATIOS
+        # If yfinance info didn't provide standard ratios, we calculate them manually
+        # from the raw statement line items.
+        # ---------------------------------------------------------------------
+        total_equity = row(balance, "Stockholders Equity", "Total Equity Gross Minority Interest", "Total Stockholder Equity")
+        total_debt   = row(balance, "Total Debt")
+        cash         = row(balance, "Cash And Cash Equivalents", "Cash", "Total Cash")
+        ebitda       = row(financials, "EBITDA", "Normalized EBITDA")
+        
+        mkt_cap = out.get("market_cap")
+
+        # Fallback P/E Ratio (Market Cap / Net Income)
+        if out.get("pe_ratio") is None and mkt_cap and net_inc is not None and len(net_inc) and float(net_inc.iloc[0]) > 0:
+            out["pe_ratio"] = round(mkt_cap / float(net_inc.iloc[0]), 2)
+            
+        # Fallback P/B Ratio (Market Cap / Total Equity)
+        if out.get("pb_ratio") is None and mkt_cap and total_equity is not None and len(total_equity) and float(total_equity.iloc[0]) > 0:
+            out["pb_ratio"] = round(mkt_cap / float(total_equity.iloc[0]), 2)
+
+        # Fallback ROE (Net Income / Total Equity)
+        if out.get("roe") is None and net_inc is not None and total_equity is not None and len(net_inc) and len(total_equity) and float(total_equity.iloc[0]) != 0:
+            out["roe"] = round(float(net_inc.iloc[0]) / float(total_equity.iloc[0]) * 100, 2)
+            
+        # Fallback Net Profit Margin (Net Income / Revenue)
+        if out.get("net_profit_margin") is None and net_inc is not None and revenue is not None and len(net_inc) and len(revenue) and float(revenue.iloc[0]) != 0:
+            out["net_profit_margin"] = round(float(net_inc.iloc[0]) / float(revenue.iloc[0]) * 100, 2)
+
+        # Fallback Operating Profit Margin (EBIT / Revenue)
+        if out.get("opm") is None and ebit is not None and revenue is not None and len(ebit) and len(revenue) and float(revenue.iloc[0]) != 0:
+            out["opm"] = round(float(ebit.iloc[0]) / float(revenue.iloc[0]) * 100, 2)
+            
+        # Fallback EV/EBITDA: (Market Cap + Total Debt - Cash) / EBITDA
+        if out.get("ev_ebitda") is None and mkt_cap and ebitda is not None and len(ebitda) and float(ebitda.iloc[0]) > 0:
+            debt_val = float(total_debt.iloc[0]) if total_debt is not None and len(total_debt) else 0.0
+            cash_val = float(cash.iloc[0]) if cash is not None and len(cash) else 0.0
+            ev = mkt_cap + debt_val - cash_val
+            out["ev_ebitda"] = round(ev / float(ebitda.iloc[0]), 2)
+
+        # ---------------------------------------------------------------------
+        # LIQUIDITY: quick ratio + working capital
+        # ---------------------------------------------------------------------
+        cur_assets = row(balance, "Current Assets", "Total Current Assets")
+        if cur_assets is not None and cur_liab is not None and len(cur_assets) and len(cur_liab) and float(cur_liab.iloc[0]) != 0:
+            inv_val = float(inventory.iloc[0]) if inventory is not None and len(inventory) else 0.0
+            out["quick_ratio"] = round((float(cur_assets.iloc[0]) - inv_val) / float(cur_liab.iloc[0]), 2)
+        if cur_assets is not None and cur_liab is not None and len(cur_assets) and len(cur_liab):
+            out["working_capital"] = round(float(cur_assets.iloc[0]) - float(cur_liab.iloc[0]), 0)
+
+        # Dividend cover = 100 / payout ratio (payout ratio is already stored
+        # as a whole percentage, e.g. 35.0 meaning 35%).
+        payout = out.get("dividend_payout_ratio")
+        if payout:
+            out["dividend_cover"] = round(100 / payout, 2)
+
+        # FCF yield = Free Cash Flow / Market Cap
+        fcf_val = out.get("free_cash_flow")
+        if fcf_val is not None and mkt_cap:
+            out["fcf_yield"] = round(fcf_val / mkt_cap * 100, 2)
+
+        # Multi-year net income / EPS CAGR (revenue CAGR already computed above)
+        if net_inc is not None and len(net_inc) >= 2:
+            out["net_income_cagr"] = _cagr(float(net_inc.iloc[-1]), float(net_inc.iloc[0]), len(net_inc) - 1)
+
+        eps_row = row(financials, "Diluted EPS", "Basic EPS")
+        if eps_row is not None and len(eps_row) >= 2 and float(eps_row.iloc[-1]) > 0:
+            out["eps_cagr"] = _cagr(float(eps_row.iloc[-1]), float(eps_row.iloc[0]), len(eps_row) - 1)
 
     except Exception as e:
         print(f"[screener] statement enrichment failed for {out.get('yf_symbol')}: {e}")
+
+    # -------------------------------------------------------------------------
+    # QUARTERLY METRICS (QoQ, YoY Quarterly)
+    # -------------------------------------------------------------------------
+    try:
+        q_fin = _safe(lambda: t.quarterly_financials, None)
+        
+        def q_row(df, *names):
+            if df is None:
+                return None
+            for n in names:
+                if n in df.index:
+                    return df.loc[n]
+            return None
+
+        q_rev = q_row(q_fin, "Total Revenue")
+        q_ni  = q_row(q_fin, "Net Income")
+
+        # Result-cadence metadata: when this row's numbers last moved, and
+        # when they're next expected to. This is what makes "changes based
+        # on quarterly/annual results" concrete — quarterly_financials
+        # always reflects whatever Yahoo has most recently ingested, so
+        # this date (and every "calculated" field above) updates itself the
+        # very next refresh pass after a company reports a new quarter.
+        if q_fin is not None and not q_fin.empty:
+            latest_col = list(q_fin.columns)[0]
+            out["last_result_date"] = latest_col.strftime("%Y-%m-%d") if hasattr(latest_col, "strftime") else str(latest_col)
+            try:
+                result_date = latest_col.to_pydatetime().date() if hasattr(latest_col, "to_pydatetime") else None
+                if result_date:
+                    out["next_earnings_estimate"] = (result_date + datetime.timedelta(days=91)).isoformat()
+                    out["days_since_last_result"] = (datetime.date.today() - result_date).days
+            except Exception:
+                pass
+
+        # QoQ Revenue Growth
+        if q_rev is not None and len(q_rev) >= 2 and float(q_rev.iloc[1]) != 0:
+            out["revenue_growth_qoq"] = round((float(q_rev.iloc[0]) - float(q_rev.iloc[1])) / abs(float(q_rev.iloc[1])) * 100, 2)
+            
+        # YoY Quarterly Revenue Growth (Current Q vs Same Q Last Year, which is typically index 0 vs index 4 if 4 quarters exist)
+        # yfinance often returns 4 or 5 quarters. Let's check length.
+        if q_rev is not None and len(q_rev) >= 5 and float(q_rev.iloc[4]) != 0:
+            # If out["revenue_growth_yoy"] is None, try to populate it here, or overwrite it as quarterly YoY is more responsive
+            yoy = round((float(q_rev.iloc[0]) - float(q_rev.iloc[4])) / abs(float(q_rev.iloc[4])) * 100, 2)
+            if out.get("revenue_growth_yoy") is None:
+                out["revenue_growth_yoy"] = yoy
+
+        # QoQ Net Income Growth
+        if q_ni is not None and len(q_ni) >= 2 and float(q_ni.iloc[1]) != 0:
+            out["net_income_growth_qoq"] = round((float(q_ni.iloc[0]) - float(q_ni.iloc[1])) / abs(float(q_ni.iloc[1])) * 100, 2)
+            
+        # YoY Quarterly Net Income Growth
+        if q_ni is not None and len(q_ni) >= 5 and float(q_ni.iloc[4]) != 0:
+            out["net_income_growth_yoy"] = round((float(q_ni.iloc[0]) - float(q_ni.iloc[4])) / abs(float(q_ni.iloc[4])) * 100, 2)
+
+    except Exception as e:
+        print(f"[screener] quarterly enrichment failed for {out.get('yf_symbol')}: {e}")
+
+
+# Weights are deliberately simple/transparent (not a proprietary model) —
+# each sub-score is normalized to 0-100 and the composite is a weighted
+# average of whichever sub-scores are actually available, re-normalized by
+# the weight actually used, so a stock missing one metric isn't unfairly
+# penalized versus one with full coverage.
+_SCORE_WEIGHTS = {
+    "roe": 0.20, "roce": 0.20, "net_profit_margin": 0.15,
+    "revenue_cagr": 0.15, "current_ratio": 0.10, "debt_to_equity": 0.20,
+}
+
+
+def _fundamental_score(out: dict) -> float | None:
+    """Simple, transparent 0-100 blend used to answer 'best/strongest
+    fundamentals' style screens without requiring a specific metric to be
+    named. Higher ROE/ROCE/margin/growth/current ratio raise it; higher D/E
+    lowers it. Returns None if too little data is available to be
+    meaningful (fewer than 3 of the 6 inputs)."""
+    total_weight = 0.0
+    score = 0.0
+    have = 0
+
+    def clamp(v, lo, hi):
+        return max(lo, min(hi, v))
+
+    for field, weight in _SCORE_WEIGHTS.items():
+        v = out.get(field)
+        if v is None:
+            continue
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            continue
+        have += 1
+        if field == "debt_to_equity":
+            sub = clamp(100 - (v / 2.0) * 100, 0, 100)   # lower D/E is better
+        elif field == "current_ratio":
+            sub = clamp((v / 2.0) * 100, 0, 100)          # 2.0x is the classic "healthy" benchmark
+        else:
+            sub = clamp((v / 30.0) * 100, 0, 100)         # 0% -> 0, 30%+ -> 100
+
+        score += sub * weight
+        total_weight += weight
+
+    if have < 3 or total_weight == 0:
+        return None
+    return round(score / total_weight, 1)
+
+
+# Fields checked to decide how much of a symbol's row is actually populated
+# — this is what answers "will refreshing fill this in, or is the data just
+# not there" without having to eyeball the raw document each time.
+_CONFIDENCE_FIELDS = [
+    "pe_ratio", "pb_ratio", "roe", "roce", "net_profit_margin", "opm",
+    "debt_to_equity", "current_ratio", "revenue_cagr", "free_cash_flow",
+]
+
+
+def _data_confidence(out: dict) -> str:
+    """'full' (>=80% of the checked fields populated), 'partial' (30-80%),
+    or 'minimal' (<30%) — e.g. a thinly-covered small-cap or a company
+    under insolvency resolution will land at 'minimal' no matter how many
+    times it's refreshed, because Yahoo itself carries little/no statement
+    data for it; that's a real gap, not a stale cache."""
+    populated = sum(1 for f in _CONFIDENCE_FIELDS if out.get(f) is not None)
+    ratio = populated / len(_CONFIDENCE_FIELDS)
+    if ratio >= 0.8:
+        return "full"
+    if ratio >= 0.3:
+        return "partial"
+    return "minimal"
 
 
 def _enrich_volume_growth(t: "yf.Ticker", out: dict) -> None:
@@ -481,7 +772,7 @@ def get_stocks_page(search: str = "", sector: str = "", exchange: str = "",
     if sector:
         query = query.where("sector", "==", sector)
 
-    docs = list(query.limit(4000).stream())
+    docs = list(query.limit(20000).stream())
     rows = [d.to_dict() for d in docs]
 
     if search:
@@ -510,7 +801,7 @@ def get_stock_detail(yf_symbol: str) -> dict | None:
 
 
 def get_sectors() -> list:
-    docs = db.collection(STOCKS_COLLECTION).select(["sector"]).limit(4000).stream()
+    docs = db.collection(STOCKS_COLLECTION).select(["sector"]).limit(20000).stream()
     return sorted({d.to_dict().get("sector") for d in docs if d.to_dict().get("sector")})
 
 
@@ -567,7 +858,7 @@ def get_refresh_status() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # FIRESTORE CACHE — write side (the refresh job)
 # ─────────────────────────────────────────────────────────────────────────────
-_FIRESTORE_BATCH_LIMIT = 400  # Firestore caps a single batch at 500 writes; stay under it
+_FIRESTORE_BATCH_LIMIT = 20  # Reduced from 400 to commit incrementally and survive Cloud Run timeouts
 
 
 def _fetch_and_commit(refs: list, request_delay_sec: float) -> int:

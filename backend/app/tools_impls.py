@@ -12,6 +12,132 @@ import yfinance as yf
 
 log = logging.getLogger(__name__)
 
+# Bounds how many cached docs a single chat-triggered screen will scan —
+# matches the cap already used elsewhere (screener_data/mf_data read paths)
+# so a filter tool call can't turn into an unbounded Firestore read.
+_SCREENER_SCAN_LIMIT = 20000
+
+
+def query_equity_screener(
+    pe_min: float = None, pe_max: float = None,
+    revenue_qoq_min: float = None,
+    roe_min: float = None,
+    roce_min: float = None,
+    de_max: float = None,
+    current_ratio_min: float = None,
+    dividend_yield_min: float = None,
+    fundamental_score_min: float = None,
+    sector: str = None,
+    exchange: str = None,
+    market_cap_min: float = None,
+    sort_by: str = "market_cap",
+    limit: int = 10
+) -> dict:
+    """Agent tool to query the fundamental stock screener cache based on
+    numeric criteria. `sort_by` can be any numeric field on the cached
+    rows — e.g. 'fundamental_score' to answer 'best fundamentals' style
+    questions without a metric being named."""
+    from .screener_data import db, STOCKS_COLLECTION
+    try:
+        docs = db.collection(STOCKS_COLLECTION).limit(_SCREENER_SCAN_LIMIT).stream()
+        results = []
+        for d in docs:
+            data = d.to_dict()
+            if sector and sector.lower() not in (data.get("sector") or "").lower(): continue
+            if exchange and (data.get("exchange") or "").upper() != exchange.upper(): continue
+            if pe_min is not None:
+                pe = data.get("pe_ratio")
+                if pe is None or pe < pe_min: continue
+            if pe_max is not None:
+                pe = data.get("pe_ratio")
+                if pe is None or pe > pe_max: continue
+            if revenue_qoq_min is not None:
+                rev = data.get("revenue_growth_qoq")
+                if rev is None or rev < revenue_qoq_min: continue
+            if roe_min is not None:
+                roe = data.get("roe")
+                if roe is None or roe < roe_min: continue
+            if roce_min is not None:
+                roce = data.get("roce")
+                if roce is None or roce < roce_min: continue
+            if de_max is not None:
+                de = data.get("debt_to_equity")
+                if de is None or de > de_max: continue
+            if current_ratio_min is not None:
+                cr = data.get("current_ratio")
+                if cr is None or cr < current_ratio_min: continue
+            if dividend_yield_min is not None:
+                dy = data.get("dividend_yield")
+                if dy is None or dy < dividend_yield_min: continue
+            if fundamental_score_min is not None:
+                fs = data.get("fundamental_score")
+                if fs is None or fs < fundamental_score_min: continue
+            if market_cap_min is not None:
+                mc = data.get("market_cap")
+                if mc is None or mc < market_cap_min: continue
+
+            results.append(data)
+
+        results.sort(key=lambda x: (x.get(sort_by) is None, x.get(sort_by) or 0), reverse=True)
+        return {"matches": results[:limit], "total_matches": len(results)}
+    except Exception as e:
+        log.error("Failed to query equity screener: %s", e)
+        return {"error": str(e)}
+
+def query_mutual_fund_screener(
+    category: str = None,
+    cagr_1y_min: float = None,
+    cagr_3y_min: float = None,
+    cagr_5y_min: float = None,
+    sharpe_min: float = None,
+    alpha_min: float = None,
+    std_dev_max: float = None,
+    quality_score_min: float = None,
+    sort_by: str = "cagr_3y",
+    limit: int = 10
+) -> dict:
+    """Agent tool to query the mutual fund screener cache based on
+    performance/risk criteria. `sort_by` can be any numeric field on the
+    cached rows — e.g. 'quality_score' to answer 'best mutual funds'
+    style questions without a metric being named."""
+    from .mf_data import db, FUNDS_COLLECTION
+    try:
+        docs = db.collection(FUNDS_COLLECTION).limit(_SCREENER_SCAN_LIMIT).stream()
+        results = []
+        for d in docs:
+            data = d.to_dict()
+            if category and category.lower() not in (data.get("category") or "").lower(): continue
+            if cagr_1y_min is not None:
+                cagr = data.get("cagr_1y")
+                if cagr is None or cagr < cagr_1y_min: continue
+            if cagr_3y_min is not None:
+                cagr = data.get("cagr_3y")
+                if cagr is None or cagr < cagr_3y_min: continue
+            if cagr_5y_min is not None:
+                cagr = data.get("cagr_5y")
+                if cagr is None or cagr < cagr_5y_min: continue
+            if sharpe_min is not None:
+                sharpe = data.get("sharpe_ratio")
+                if sharpe is None or sharpe < sharpe_min: continue
+            if alpha_min is not None:
+                alpha = data.get("alpha")
+                if alpha is None or alpha < alpha_min: continue
+            if std_dev_max is not None:
+                sd = data.get("standard_deviation")
+                if sd is None or sd > std_dev_max: continue
+            if quality_score_min is not None:
+                qs = data.get("quality_score")
+                if qs is None or qs < quality_score_min: continue
+
+            results.append(data)
+
+        results.sort(key=lambda x: (x.get(sort_by) is None, x.get(sort_by) or -999), reverse=True)
+        return {"matches": results[:limit], "total_matches": len(results)}
+    except Exception as e:
+        log.error("Failed to query MF screener: %s", e)
+        return {"error": str(e)}
+
+
 # Indian small/mid-cap and newly-listed IPO names are almost always what
 # users ask about here, but the LLM will often pass the bare company name
 # ("Tempsens Instruments India Ltd") instead of a resolvable Yahoo Finance
@@ -308,7 +434,102 @@ TOOL_SCHEMAS = {
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    "query_equity_screener": {
+        "type": "function",
+        "function": {
+            "name": "query_equity_screener",
+            "description": (
+                "Query the fundamental stock screener cache for stocks matching numeric criteria "
+                "(PE, ROE, ROCE, D/E, current ratio, dividend yield, QoQ revenue growth, market cap, "
+                "sector/exchange). Use 'sort_by': 'fundamental_score' and no other filters when the "
+                "user wants the 'best'/'strongest' stocks without naming a specific metric — "
+                "fundamental_score is a transparent 0-100 blend of ROE, ROCE, margin, revenue CAGR, "
+                "D/E and current ratio."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pe_min": {"type": "number", "description": "Minimum PE ratio"},
+                    "pe_max": {"type": "number", "description": "Maximum PE ratio"},
+                    "revenue_qoq_min": {"type": "number", "description": "Minimum Quarter-over-Quarter revenue growth % (e.g. 20 for 20%)"},
+                    "roe_min": {"type": "number", "description": "Minimum Return on Equity %"},
+                    "roce_min": {"type": "number", "description": "Minimum Return on Capital Employed %"},
+                    "de_max": {"type": "number", "description": "Maximum Debt/Equity ratio (x)"},
+                    "current_ratio_min": {"type": "number", "description": "Minimum current ratio"},
+                    "dividend_yield_min": {"type": "number", "description": "Minimum dividend yield %"},
+                    "fundamental_score_min": {"type": "number", "description": "Minimum composite fundamental quality score (0-100)"},
+                    "sector": {"type": "string", "description": "Sector name to filter by"},
+                    "exchange": {"type": "string", "description": "'NSE' or 'BSE' to filter by exchange"},
+                    "market_cap_min": {"type": "number", "description": "Minimum market cap"},
+                    "sort_by": {"type": "string", "description": "Field to sort results by, descending (default 'market_cap'; use 'fundamental_score' for 'best stocks' style questions)"},
+                    "limit": {"type": "number", "description": "Max number of results to return (default 10)"}
+                }
+            }
+        }
+    },
+    "query_mutual_fund_screener": {
+        "type": "function",
+        "function": {
+            "name": "query_mutual_fund_screener",
+            "description": (
+                "Query the mutual fund screener cache for funds matching performance/risk criteria "
+                "(1/3/5-year CAGR, Sharpe, Alpha, volatility, category). Use 'sort_by': 'quality_score' "
+                "and no other filters when the user wants the 'best' funds without naming a specific "
+                "metric — quality_score is a transparent 0-100 blend of CAGR, Sharpe, Alpha and "
+                "(inverted) volatility."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "Category name to filter by (e.g. 'Large Cap Fund')"},
+                    "cagr_1y_min": {"type": "number", "description": "Minimum 1-year CAGR %"},
+                    "cagr_3y_min": {"type": "number", "description": "Minimum 3-year CAGR %"},
+                    "cagr_5y_min": {"type": "number", "description": "Minimum 5-year CAGR %"},
+                    "sharpe_min": {"type": "number", "description": "Minimum Sharpe ratio"},
+                    "alpha_min": {"type": "number", "description": "Minimum Alpha"},
+                    "std_dev_max": {"type": "number", "description": "Maximum annualized standard deviation % (volatility ceiling)"},
+                    "quality_score_min": {"type": "number", "description": "Minimum composite quality score (0-100)"},
+                    "sort_by": {"type": "string", "description": "Field to sort results by, descending (default 'cagr_3y'; use 'quality_score' for 'best funds' style questions)"},
+                    "limit": {"type": "number", "description": "Max number of results to return (default 10)"}
+                }
+            }
+        }
+    },
+    "get_hotel_availability": {
+        "type": "function",
+        "function": {
+            "name": "get_hotel_availability",
+            "description": "Check for live hotel room availability, lowest prices, and room counts using Amadeus given a geolocation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "latitude": {"type": "number", "description": "Latitude of the target location"},
+                    "longitude": {"type": "number", "description": "Longitude of the target location"},
+                    "radius": {"type": "number", "description": "Search radius in km (default 5)"},
+                    "check_in_date": {"type": "string", "description": "Check in date YYYY-MM-DD"},
+                    "check_out_date": {"type": "string", "description": "Check out date YYYY-MM-DD"},
+                    "adults": {"type": "number", "description": "Number of adults (default 1)"}
+                },
+                "required": ["latitude", "longitude", "check_in_date", "check_out_date"]
+            }
+        }
+    }
 }
+
+def _get_hotel_availability_wrapper(args):
+    from .amadeus_client import get_hotel_availability as amadeus_avail
+    try:
+        return amadeus_avail(
+            lat=args.get("latitude"),
+            lon=args.get("longitude"),
+            radius=args.get("radius", 5),
+            check_in=args.get("check_in_date"),
+            check_out=args.get("check_out_date"),
+            adults=args.get("adults", 1)
+        )
+    except Exception as e:
+        log.error("Failed to fetch hotel availability: %s", e)
+        return {"error": str(e)}
 
 TOOL_IMPLS = {
     "get_market_data": lambda args: get_market_data(args.get("ticker", "")),
@@ -316,4 +537,23 @@ TOOL_IMPLS = {
     "get_macro_indicators": lambda args: get_macro_indicators(),
     "get_safe_route": lambda args: get_safe_route(args.get("source", ""), args.get("destination", "")),
     "get_market_movers": lambda args: get_market_movers(),
+    "query_equity_screener": lambda args: query_equity_screener(
+        pe_min=args.get("pe_min"), pe_max=args.get("pe_max"),
+        revenue_qoq_min=args.get("revenue_qoq_min"), roe_min=args.get("roe_min"),
+        roce_min=args.get("roce_min"), de_max=args.get("de_max"),
+        current_ratio_min=args.get("current_ratio_min"),
+        dividend_yield_min=args.get("dividend_yield_min"),
+        fundamental_score_min=args.get("fundamental_score_min"),
+        sector=args.get("sector"), exchange=args.get("exchange"),
+        market_cap_min=args.get("market_cap_min"),
+        sort_by=args.get("sort_by", "market_cap"), limit=args.get("limit", 10),
+    ),
+    "query_mutual_fund_screener": lambda args: query_mutual_fund_screener(
+        category=args.get("category"), cagr_1y_min=args.get("cagr_1y_min"),
+        cagr_3y_min=args.get("cagr_3y_min"), cagr_5y_min=args.get("cagr_5y_min"),
+        sharpe_min=args.get("sharpe_min"), alpha_min=args.get("alpha_min"),
+        std_dev_max=args.get("std_dev_max"), quality_score_min=args.get("quality_score_min"),
+        sort_by=args.get("sort_by", "cagr_3y"), limit=args.get("limit", 10),
+    ),
+    "get_hotel_availability": _get_hotel_availability_wrapper,
 }

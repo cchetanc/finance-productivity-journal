@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Header
 from typing import Optional
 from ..mf_data import (
     get_funds_page, get_fund_detail, get_categories, get_refresh_status, run_refresh_batch, run_full_refresh,
+    FUND_FIELD_CATALOG,
 )
 
 router = APIRouter(prefix="/api/mutual-funds", tags=["Mutual Funds"])
@@ -32,6 +33,16 @@ def list_funds(search: str = "", category: str = "",
 @router.get("/categories")
 def list_categories():
     return {"categories": get_categories()}
+
+
+@router.get("/fields")
+def list_fields():
+    """Documents every column on a mutual_funds row: whether it's pulled,
+    calculated (with the formula), or has no free source and is
+    intentionally left blank, and how often it can realistically change.
+    Must stay registered before /{scheme_code} so 'fields' isn't matched
+    as a scheme code."""
+    return {"fields": FUND_FIELD_CATALOG}
 
 
 @router.get("/status")

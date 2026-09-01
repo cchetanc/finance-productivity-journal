@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Header
 from typing import Optional
 from ..screener_data import (
     get_stocks_page, get_stock_detail, get_sectors, get_refresh_status, run_refresh_batch, run_full_refresh,
+    FIELD_CATALOG,
 )
 
 router = APIRouter(prefix="/api/screener", tags=["Equity Screener"])
@@ -38,6 +39,17 @@ def list_stocks(search: str = "", sector: str = "", exchange: str = "",
 @router.get("/sectors")
 def list_sectors():
     return {"sectors": get_sectors()}
+
+
+@router.get("/fields")
+def list_fields():
+    """Documents every column on a screener_stocks row: whether it's pulled
+    straight from Yahoo Finance, calculated here (with the formula), or has
+    no free source and is intentionally left blank — and how often each one
+    can realistically change (real_time/daily/quarterly/annual). Lets the
+    frontend or a caller show *why* a field is blank instead of leaving
+    that to guesswork."""
+    return {"fields": FIELD_CATALOG}
 
 
 @router.get("/stocks/{yf_symbol}")

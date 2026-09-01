@@ -42,6 +42,55 @@ MFAPI_HISTORY_URL = "https://api.mfapi.in/mf/{code}"
 
 RISK_FREE_RATE_ANNUAL = 0.065  # approx. Indian short-term G-sec/repo proxy; update as needed
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FIELD CATALOG — mirrors screener_data.FIELD_CATALOG: what each column is,
+# where it comes from, and how often it can realistically change. Every
+# refresh pass re-pulls a scheme's full NAV history from mfapi.in and
+# recomputes every "calculated" field from scratch, so once a fund publishes
+# a new NAV (daily) the return/risk numbers move on the very next refresh —
+# no separate "wait for quarter-end" logic is needed for a mutual fund the
+# way there is for a company's statements.
+FUND_FIELD_CATALOG: dict = {
+    "nav":                    {"source": "pulled",      "refresh": "daily"},
+    "category":               {"source": "pulled",      "refresh": "static"},
+    "cagr_1y":                {"source": "calculated",  "refresh": "daily", "formula": "CAGR of NAV over the trailing ~1 year"},
+    "cagr_3y":                {"source": "calculated",  "refresh": "daily", "formula": "CAGR of NAV over the trailing ~3 years"},
+    "cagr_5y":                {"source": "calculated",  "refresh": "daily", "formula": "CAGR of NAV over the trailing ~5 years"},
+    "cagr_10y":               {"source": "calculated",  "refresh": "daily", "formula": "CAGR of NAV over the trailing ~10 years"},
+    "alpha":                  {"source": "calculated",  "refresh": "daily", "formula": "annualized fund return - (risk-free + beta * (benchmark return - risk-free)), vs. Nifty 50"},
+    "beta":                   {"source": "calculated",  "refresh": "daily", "formula": "covariance(fund, Nifty 50) / variance(Nifty 50)"},
+    "sharpe_ratio":           {"source": "calculated",  "refresh": "daily", "formula": "(mean daily return - daily risk-free) / daily std dev, annualized"},
+    "sortino_ratio":          {"source": "calculated",  "refresh": "daily", "formula": "like Sharpe, but only penalizes downside deviation"},
+    "standard_deviation":     {"source": "calculated",  "refresh": "daily", "formula": "annualized std dev of daily NAV returns"},
+    "r_squared":              {"source": "calculated",  "refresh": "daily", "formula": "correlation(fund, Nifty 50) squared"},
+    "treynor_ratio":          {"source": "calculated",  "refresh": "daily", "formula": "Alpha / Beta"},
+    "max_drawdown":           {"source": "calculated",  "refresh": "daily", "formula": "largest peak-to-trough NAV decline over available history"},
+    "calmar_ratio":           {"source": "calculated",  "refresh": "daily", "formula": "CAGR (3y, or longest available) / |max drawdown|"},
+    "quality_score":          {"source": "calculated",  "refresh": "daily", "formula": "weighted blend of CAGR, Sharpe, Alpha, and (inverted) volatility — see _quality_score()"},
+    "data_confidence":        {"source": "calculated",  "refresh": "daily", "formula": "how much of the risk/return field set actually populated for this scheme — see _fund_data_confidence()"},
+    "expense_ratio":          {"source": "unavailable", "refresh": None},
+    "exit_load":              {"source": "unavailable", "refresh": None},
+    "aum":                    {"source": "unavailable", "refresh": None},
+    "fund_manager_tenure":    {"source": "unavailable", "refresh": None},
+    "fund_manager_track_record": {"source": "unavailable", "refresh": None},
+    "portfolio_pe":           {"source": "unavailable", "refresh": None},
+    "portfolio_pb":           {"source": "unavailable", "refresh": None},
+    "equity_debt_split":      {"source": "unavailable", "refresh": None},
+    "sector_concentration":   {"source": "unavailable", "refresh": None},
+    "credit_quality":         {"source": "unavailable", "refresh": None},
+    "average_maturity":       {"source": "unavailable", "refresh": None},
+    "modified_duration":      {"source": "unavailable", "refresh": None},
+    "ytm":                    {"source": "unavailable", "refresh": None},
+    "benchmark_deviation":    {"source": "unavailable", "refresh": None},
+    "portfolio_turnover":     {"source": "unavailable", "refresh": None},
+    "min_sip_amount":         {"source": "unavailable", "refresh": None},
+    "information_ratio":      {"source": "unavailable", "refresh": None},
+    "upside_capture":         {"source": "unavailable", "refresh": None},
+    "downside_capture":       {"source": "unavailable", "refresh": None},
+    "rolling_returns":        {"source": "unavailable", "refresh": None},
+    "tracking_error":         {"source": "unavailable", "refresh": None},
+}
+
 
 def fetch_amfi_scheme_list() -> list:
     """Parses AMFI's NAVAll.txt. The file is semicolon-delimited with
@@ -54,25 +103,31 @@ def fetch_amfi_scheme_list() -> list:
         lines = resp.text.splitlines()
         schemes = []
         current_category = ""
+        current_amc = ""
         for line in lines:
             line = line.strip()
             if not line:
                 continue
             if ";" not in line:
-                # Heading line, e.g. an AMC name or a scheme-category label.
-                current_category = line
+                # AMFI interleaves both Category labels and AMC names as bare lines.
+                if "Mutual Fund" in line:
+                    current_amc = line
+                else:
+                    current_category = line
                 continue
             parts = line.split(";")
-            if len(parts) < 5 or parts[0] == "Scheme Code":
+            if len(parts) < 7 or parts[0] == "Scheme Code":
                 continue
-            code, isin_growth, isin_div, name, nav = parts[0], parts[1], parts[2], parts[3], parts[4]
+            code, isin_growth, isin_div, scheme_name, plan, option, nav = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
             try:
                 nav_val = float(nav)
             except Exception:
                 continue
+            
+            full_name = f"{scheme_name.strip()} ({plan.strip()} - {option.strip()})"
             schemes.append({
                 "scheme_code": code.strip(),
-                "name": name.strip(),
+                "name": full_name,
                 "category": current_category,
                 "nav": nav_val,
                 "isin_growth": isin_growth.strip(),
@@ -141,18 +196,47 @@ def _cagr_from_history(hist: list, years_back: float) -> float | None:
     return round((((end_nav / start_point[1]) ** (1 / actual_years)) - 1) * 100, 2)
 
 
+def _max_drawdown(hist: list) -> float | None:
+    """Largest peak-to-trough decline in NAV over the available history, as
+    a negative percentage (e.g. -32.4 meaning a 32.4% drawdown at the worst
+    point). A real, computable risk signal straight from NAV history — no
+    statement data needed, and it updates every refresh just like CAGR."""
+    if len(hist) < 2:
+        return None
+    peak = hist[0][1]
+    worst = 0.0
+    for _, nav in hist:
+        if nav > peak:
+            peak = nav
+        if peak > 0:
+            dd = (nav / peak) - 1
+            if dd < worst:
+                worst = dd
+    return round(worst * 100, 2)
+
+
 def compute_risk_metrics(hist: list) -> dict:
-    """CAGR (3/5/10yr), Alpha, Beta, Sharpe, Sortino, Std Dev, R-squared —
-    computed from daily NAV returns over however much history is available
-    (fund-of-funds returns rows: None where history doesn't reach that
-    horizon, e.g. a 2-year-old fund has no 5yr/10yr CAGR)."""
+    """CAGR (1/3/5/10yr), Alpha, Beta, Sharpe, Sortino, Std Dev, R-squared,
+    max drawdown, Calmar — computed from daily NAV returns over however much
+    history is available (rows come back None where history doesn't reach
+    that horizon, e.g. a 2-year-old fund has no 5yr/10yr CAGR)."""
     out = {
+        "cagr_1y": _cagr_from_history(hist, 1),
         "cagr_3y": _cagr_from_history(hist, 3),
         "cagr_5y": _cagr_from_history(hist, 5),
         "cagr_10y": _cagr_from_history(hist, 10),
         "alpha": None, "beta": None, "sharpe_ratio": None, "sortino_ratio": None,
         "standard_deviation": None, "r_squared": None,
+        "max_drawdown": _max_drawdown(hist),
+        "calmar_ratio": None,
     }
+    # Calmar = best available longer-horizon CAGR / |max drawdown|. Prefers
+    # 3y so it isn't dominated by a single recent dip, but falls back to
+    # whatever horizon the fund actually has history for.
+    horizon_cagr = out["cagr_3y"] or out["cagr_5y"] or out["cagr_1y"]
+    if horizon_cagr is not None and out["max_drawdown"]:
+        out["calmar_ratio"] = round(horizon_cagr / abs(out["max_drawdown"]), 2)
+
     if len(hist) < 30:
         return out
 
@@ -200,6 +284,61 @@ def compute_risk_metrics(hist: list) -> dict:
     return out
 
 
+# Weights are deliberately simple/transparent, not a proprietary model —
+# each sub-score normalizes to 0-100 and the composite re-normalizes by
+# whichever weights actually had data, so a fund missing one metric (e.g.
+# too young for a 5y CAGR) isn't unfairly penalized against one with full
+# history.
+_FUND_SCORE_WEIGHTS = {"cagr_5y": 0.30, "cagr_3y": 0.20, "sharpe_ratio": 0.25,
+                        "alpha": 0.15, "standard_deviation": 0.10}
+
+
+def _quality_score(metrics: dict) -> float | None:
+    """Simple, transparent 0-100 blend used to answer 'best mutual funds'
+    style questions without the user having to name a specific metric —
+    higher CAGR/Sharpe/Alpha raise it, higher volatility (std dev) lowers
+    it. Returns None if too little data is available (fewer than 3 of the
+    5 inputs), e.g. a fund too new to have any multi-year CAGR yet."""
+    def clamp(v, lo, hi):
+        return max(lo, min(hi, v))
+
+    total_weight = 0.0
+    score = 0.0
+    have = 0
+    for field, weight in _FUND_SCORE_WEIGHTS.items():
+        v = metrics.get(field)
+        if v is None:
+            continue
+        have += 1
+        if field in ("cagr_5y", "cagr_3y"):
+            sub = clamp((v / 20.0) * 100, 0, 100)          # 0% -> 0, 20%+ -> 100
+        elif field == "sharpe_ratio":
+            sub = clamp((v / 2.0) * 100, 0, 100)            # 2.0 Sharpe -> 100
+        elif field == "alpha":
+            sub = clamp(50 + (v / 10.0) * 50, 0, 100)       # 0 alpha -> 50, +/-10 -> 100/0
+        else:  # standard_deviation — lower is better
+            sub = clamp(100 - (v / 40.0) * 100, 0, 100)     # 0% vol -> 100, 40%+ -> 0
+        score += sub * weight
+        total_weight += weight
+
+    if have < 3 or total_weight == 0:
+        return None
+    return round(score / total_weight, 1)
+
+
+def _fund_data_confidence(hist: list, metrics: dict) -> str:
+    """'full' (enough NAV history for 5y CAGR + full risk stats), 'partial'
+    (some history but short of 5y, e.g. a newer fund), or 'minimal' (mfapi.in
+    returned little/no usable history for this scheme code). Mirrors
+    screener_data._data_confidence — tells you whether a blank field will
+    fill in on the next refresh, or is a genuine data gap for this fund."""
+    if len(hist) < 30:
+        return "minimal"
+    if metrics.get("cagr_5y") is not None and metrics.get("sharpe_ratio") is not None:
+        return "full"
+    return "partial"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FIRESTORE CACHE — read side
 # ─────────────────────────────────────────────────────────────────────────────
@@ -209,7 +348,7 @@ def get_funds_page(search: str = "", category: str = "",
     query = db.collection(FUNDS_COLLECTION)
     if category:
         query = query.where("category", "==", category)
-    docs = list(query.limit(4000).stream())
+    docs = list(query.limit(20000).stream())
     rows = [d.to_dict() for d in docs]
 
     if search:
@@ -229,7 +368,7 @@ def get_fund_detail(scheme_code: str) -> dict | None:
 
 
 def get_categories() -> list:
-    docs = db.collection(FUNDS_COLLECTION).select(["category"]).limit(4000).stream()
+    docs = db.collection(FUNDS_COLLECTION).select(["category"]).limit(20000).stream()
     return sorted({d.to_dict().get("category") for d in docs if d.to_dict().get("category")})
 
 
@@ -241,7 +380,7 @@ def get_refresh_status() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # FIRESTORE CACHE — write side (the refresh job)
 # ─────────────────────────────────────────────────────────────────────────────
-_FIRESTORE_BATCH_LIMIT = 400  # Firestore caps a single batch at 500 writes; stay under it
+_FIRESTORE_BATCH_LIMIT = 20  # Reduced from 400 to commit incrementally and survive Cloud Run timeouts
 
 
 def _build_scheme_doc(scheme: dict) -> dict:
@@ -250,6 +389,8 @@ def _build_scheme_doc(scheme: dict) -> dict:
     return {
         **scheme,
         **metrics,
+        "quality_score": _quality_score(metrics),
+        "data_confidence": _fund_data_confidence(hist, metrics),
         "last_updated": datetime.datetime.utcnow().isoformat(),
         # Fields with no free source — see module docstring.
         "expense_ratio": None, "exit_load": None, "aum": None,

@@ -72,14 +72,26 @@ with info_col:
     else:
         st.warning("No refresh has run yet — the cache is empty, so the table below has nothing to show. Click 'Populate now' →")
 with btn_col:
-    if st.button("⚡ Populate now (full)", use_container_width=True, help="Runs a full pass over the entire NSE+BSE universe right now (~5,000 symbols). Requires the backend's request timeout to be raised — see the note below if it errors out partway."):
-        with st.spinner("Fetching the full NSE+BSE universe — this can take ~20-30 minutes. Don't close this tab."):
-            try:
-                requests.post(f"{BACKEND_URL}/api/screener/refresh", params={"full": True}, timeout=3600)
-            except Exception as e:
-                st.warning(f"Request ended early ({e}) — this is expected if the backend's timeout is still at its default 300s. "
-                           "Progress is committed incrementally as it goes, so whatever finished is already saved. "
-                           "Raise the Cloud Run service timeout to 3600s (see caption below) and click again to pick up where it left off.")
+    if st.button("⚡ Populate now (full)", use_container_width=True, help="Runs a full pass over the entire NSE+BSE universe right now (~5,000 symbols). Uses incremental client-side batching to bypass Cloud Run timeouts."):
+        progress_text = "Populating NSE+BSE universe..."
+        my_bar = st.progress(0.0, text=progress_text)
+        try:
+            while True:
+                resp = requests.post(f"{BACKEND_URL}/api/screener/refresh", params={"full": False, "batch_size": 10}, timeout=120)
+                if resp.status_code != 200:
+                    st.error(f"Backend error: {resp.text}")
+                    break
+                data = resp.json()
+                cursor = data.get("cursor", 0)
+                total = data.get("universe_size", 1)
+                
+                pct = min(1.0, max(0.0, cursor / total)) if total > 0 else 0.0
+                my_bar.progress(pct, text=f"{progress_text} {cursor:,} / {total:,} symbols")
+                
+                if data.get("wrapped_full_pass"):
+                    break
+        except Exception as e:
+            st.error(f"Populate interrupted: {e}")
         st.cache_data.clear()
         st.rerun()
 st.caption("One-time setup for automatic nightly refresh: raise the backend's request timeout "
@@ -107,6 +119,14 @@ page_size = 30
 if "screener_page" not in st.session_state:
     st.session_state.screener_page = 1
 
+if "filters" not in st.session_state:
+    st.session_state.filters = {"search": "", "sector": "", "exchange": "", "sort_by": ""}
+
+current_filters = {"search": search, "sector": sector, "exchange": exchange, "sort_by": sort_by}
+if current_filters != st.session_state.filters:
+    st.session_state.screener_page = 1
+    st.session_state.filters = current_filters
+
 data = fetch_stocks(search, sector, exchange, sort_by, True, st.session_state.screener_page, page_size)
 rows = data.get("results", [])
 total = data.get("total", 0)
@@ -118,12 +138,14 @@ else:
     for r in rows:
         display_rows.append({
             "Symbol": r.get("symbol"), "Exchange": r.get("exchange"), "Name": r.get("name"),
-            "Sector": r.get("sector"), "Mkt Cap": r.get("market_cap"),
+            "Sector": r.get("sector"), "Mkt Cap": r.get("market_cap"), "Price": r.get("current_price"),
             "P/E": r.get("pe_ratio"), "Fwd P/E": r.get("forward_pe"), "PEG": r.get("peg_ratio"),
             "P/B": r.get("pb_ratio"), "EV/EBITDA": r.get("ev_ebitda"), "P/S": r.get("ps_ratio"),
             "ROE %": r.get("roe"), "ROCE %": r.get("roce"), "NPM %": r.get("net_profit_margin"),
             "OPM %": r.get("opm"), "Rev CAGR %": r.get("revenue_cagr"), "D/E": r.get("debt_to_equity"),
             "Div Yield %": r.get("dividend_yield"), "Vol Growth %": r.get("volume_growth"),
+            "QoQ Rev Gr %": r.get("revenue_growth_qoq"), "QoQ NI Gr %": r.get("net_income_growth_qoq"),
+            "YoY Rev Gr %": r.get("revenue_growth_yoy"), "YoY NI Gr %": r.get("net_income_growth_yoy"),
         })
     st.dataframe(display_rows, use_container_width=True, hide_index=True)
 

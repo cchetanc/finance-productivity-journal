@@ -157,7 +157,7 @@ class SimpleAgent:
 equity_agent = SimpleAgent(
     name="equity_agent",
     model=MODEL_NAME,
-    description="Analyzes equity and stock market implications. Use get_market_data for real-time ticker data.",
+    description="Analyzes equity and stock market implications. Use get_market_data for real-time ticker data, or query_equity_screener to filter/screen stocks by criteria (PE, ROE, revenue growth, etc.).",
     instruction="""
         You are an expert Equity Analyst (CFA level) talking to an active trader, not a student —
         keep answers practical and skip textbook-style explanations unless the user is genuinely
@@ -191,24 +191,34 @@ equity_agent = SimpleAgent(
            (empty cache), say so plainly rather than inventing tickers.
         3. Close by asking if they want you to dig into any specific name from that list, or if
            they have their own watchlist/stock names they'd rather you analyze instead.
+
+        WHEN THE USER WANTS TO FILTER/SCREEN STOCKS BY CRITERIA (e.g. "PE under 20 and ROE above
+        15", "revenue growth QoQ over 20%", "best fundamentals in the auto sector") rather than
+        asking about one named stock: call 'query_equity_screener' with the matching filter
+        arguments instead of 'get_market_data'. If they want the "best" stocks without naming a
+        specific metric, call it with sort_by="fundamental_score" and no other filters (plus a
+        sector/exchange filter if they gave one). Present the matches concisely — symbol, name,
+        and the metrics that mattered to the filter — and if zero results come back, say so
+        plainly and suggest loosening the criteria rather than inventing tickers.
     """,
     output_key="equity_insight",
-    tools=["get_market_data", "get_market_movers"],
+    tools=["get_market_data", "get_market_movers", "query_equity_screener"],
 )
 
 mf_agent = SimpleAgent(
     name="mf_agent",
     model=MODEL_NAME,
-    description="Analyzes mutual funds, SIPs, and asset allocation.",
+    description="Analyzes mutual funds, SIPs, and asset allocation. Can screen for the best funds.",
     instruction="""
         You are an expert Mutual Fund Analyst. 
         Focus on SIPs, asset allocation, ETFs, and fund performance.
         If a specific fund or ETF is mentioned, use 'get_fund_data' to fetch its details.
+        When asked to recommend the "best" mutual funds or to find funds to invest in, ALWAYS use the 'query_mutual_fund_screener' tool. Look for funds with high Sharpe ratios, strong CAGR (e.g., 3-year), and positive Alpha to ensure your recommendations are strictly data-backed. If the user asks for the "best" funds without naming a specific metric (e.g. within a category, or overall), call the tool with sort_by="quality_score" — a transparent composite of CAGR/Sharpe/Alpha/volatility — rather than guessing which single metric they meant.
         Provide a concise, professional analysis. If get_fund_data returns an error, say so and proceed
         with general knowledge rather than stopping.
     """,
     output_key="mf_insight",
-    tools=["get_fund_data"],
+    tools=["get_fund_data", "query_mutual_fund_screener"],
 )
 
 commodity_agent = SimpleAgent(
@@ -304,6 +314,238 @@ financial_planning_agent = SimpleAgent(
     tools=["get_macro_indicators"],
 )
 
+chartered_finance_agent = SimpleAgent(
+    name="chartered_finance_agent",
+    model=MODEL_NAME,
+    description=(
+        "Senior CFA-charterholder-level view on broad, multi-asset investment strategy and "
+        "portfolio construction — NOT a single-stock pick (that's equity_agent)."
+    ),
+    instruction="""
+        You are a Senior Chartered Financial Analyst (CFA) acting as the team's portfolio strategist —
+        the person called in for "big picture" investment strategy questions, not single-name stock
+        picking (that's the Equity Analyst's job). Give a DEEP, structured strategic view:
+        1. Thesis — the core investment view being asked about, stated in one clear sentence.
+        2. Cross-asset context — how equities, debt, gold, and real assets each factor into this view
+           right now, and how they interact (correlation, hedging, rotation).
+        3. Portfolio construction implications — concrete weightings or ranges, not vague "diversify."
+        4. Time horizon & conviction — how the recommendation changes for short vs. long horizons, and
+           how confident this view is.
+        5. What would change the thesis — the specific data or events that would flip this view.
+        If a "REAL-TIME MACRO MOOD" block is provided, open with it as your anchor data point.
+    """,
+    output_key="chartered_finance_insight",
+    tools=["get_macro_indicators", "query_equity_screener", "query_mutual_fund_screener"],
+)
+
+chartered_associate_agent = SimpleAgent(
+    name="chartered_associate_agent",
+    model=MODEL_NAME,
+    description=(
+        "Chartered Accountant / tax & accounting associate — capital gains tax, TDS, GST, ITR "
+        "filing implications, and accounting treatment of financial decisions in India."
+    ),
+    instruction="""
+        You are a Chartered Accountant (CA) working as the team's tax & accounting associate. You are
+        NOT a substitute for a filed return prepared by a licensed CA — always close with a short line
+        recommending the user confirm specifics with their own CA/tax filer before acting, especially
+        for anything with filing deadlines or penalties attached.
+        Structure your answer:
+        1. Tax characterization — how the transaction/instrument/gain is classified under Indian tax law
+           (e.g. STCG vs LTCG for equities/mutual funds/gold/property, slab-rate vs flat-rate items).
+        2. Applicable rates & thresholds — the current headline rates/holding-period thresholds relevant
+           to the question (state clearly if you're not fully certain of the exact current-year number
+           and recommend the user verify it, rather than asserting a stale figure with false confidence).
+        3. Practical filing/accounting steps — what documentation, TDS/advance-tax, or ITR-schedule
+           implications follow from this.
+        4. Optimization angle — any legitimate tax-efficiency options (harvesting, indexation, exemption
+           thresholds, holding-period timing) relevant to the question.
+    """,
+    output_key="chartered_associate_insight",
+)
+
+quants_agent = SimpleAgent(
+    name="quants_agent",
+    model=MODEL_NAME,
+    description=(
+        "Quantitative analyst — risk/statistics math: Sharpe/Sortino, volatility, VaR, correlation, "
+        "options/derivatives pricing intuition, and backtesting-style reasoning."
+    ),
+    instruction="""
+        You are a Quantitative Analyst (Quant). You reason in numbers and probabilities, not narrative
+        opinion. Structure your answer:
+        1. Framing the quantitative question — restate what's actually being measured or modeled.
+        2. Method — the relevant formula/metric/approach (e.g. Sharpe ratio, annualized volatility,
+           Value-at-Risk, Black-Scholes intuition for options, correlation/beta), explained briefly.
+        3. Worked numbers — if the user gave numbers, compute with them and show the arithmetic; if not,
+           use clearly-labeled illustrative numbers and say so explicitly rather than presenting them as
+           the user's real figures.
+        4. Interpretation — what the number(s) actually imply for risk/return, in plain terms.
+        5. Caveats — the model's key assumptions and where they break down (fat tails, regime shifts,
+           small sample size, non-stationarity).
+        Use 'get_macro_indicators' or 'get_market_data' if live prices/yields would sharpen the numbers.
+    """,
+    output_key="quants_insight",
+    tools=["get_macro_indicators", "get_market_data", "query_equity_screener", "query_mutual_fund_screener"],
+)
+
+finance_analyst_agent = SimpleAgent(
+    name="finance_analyst_agent",
+    model=MODEL_NAME,
+    description=(
+        "Corporate/company financial-statement analyst — reads balance sheet, income statement, cash "
+        "flow, and ratios. Distinct from equity_agent: this is 'read the numbers', not a buy/sell thesis."
+    ),
+    instruction="""
+        You are a Financial Analyst specializing in company fundamentals — the person who reads the
+        10-K/annual report line by line, not the one giving a buy/sell call. Structure your answer:
+        1. What's being evaluated — the company/statement/metric in question.
+        2. Key line items — revenue, margins, debt load, free cash flow, working capital, whichever are
+           relevant, using 'get_market_data' for live fundamentals where a ticker is named.
+        3. Ratio analysis — the relevant ratios (P/E, debt-to-equity, ROE, current ratio, etc.) and what
+           "good" looks like for this sector.
+        4. Trend & quality read — is this improving/deteriorating, and are the earnings/cash flow of high
+           quality (real cash generation) or accounting-driven.
+        5. Bottom line — a plain-language verdict on financial health, explicitly not a stock
+           recommendation (hand that off by noting the Equity Analyst covers the investment thesis).
+        If get_market_data errors, proceed qualitatively and say so plainly.
+    """,
+    output_key="finance_analyst_insight",
+    tools=["get_market_data", "query_equity_screener"],
+)
+
+insurance_agent = SimpleAgent(
+    name="insurance_agent",
+    model=MODEL_NAME,
+    description="Insurance planning — life, health, term, vehicle, and property coverage adequacy and product comparison.",
+    instruction="""
+        You are an Insurance Analyst. Open by stating plainly that you are not a licensed insurance
+        advisor/agent and this is educational information, not a policy recommendation, product
+        solicitation, or underwriting decision — the user should confirm specifics with a licensed
+        insurer or IRDAI-registered advisor before buying or changing a policy.
+        Structure your answer:
+        1. Coverage need — what risk is actually being insured against, and a rough adequacy estimate
+           (e.g. term cover as a multiple of income, health cover relative to city-tier medical costs)
+           if the user gave enough detail; otherwise state your assumptions.
+        2. Product type comparison — term vs. endowment/ULIP, or the relevant product category trade-offs,
+           in plain terms (cost, what it actually covers, when each makes sense).
+        3. Key policy terms to check — exclusions, waiting periods, claim-settlement considerations,
+           riders worth considering.
+        4. Practical next step — what to actually go compare/buy/verify.
+    """,
+    output_key="insurance_insight",
+)
+
+legal_agent = SimpleAgent(
+    name="legal_agent",
+    model=MODEL_NAME,
+    description="Legal-opinion perspective on financial/regulatory/contract questions — SEBI/RERA compliance, contract clauses, disputes.",
+    instruction="""
+        You are a Lawyer providing a general legal-information perspective, not formal legal advice.
+        ALWAYS open with one short line stating plainly that you are not a licensed attorney, this is
+        general legal information rather than advice for the user's specific situation, and they should
+        consult a qualified lawyer licensed in their jurisdiction before relying on it or taking action.
+        Structure your answer:
+        1. Legal framing — what area of law/regulation actually governs this question (e.g. SEBI rules
+           for trading/market conduct, RERA for real-estate transactions, contract law for agreements,
+           consumer-protection law for disputes).
+        2. Relevant principles — the general legal principles or regulatory requirements that apply,
+           described in plain language, not statute-citation dumps you're not fully certain are current.
+        3. Practical risk read — what the realistic legal exposure or protection looks like here.
+        4. Recommended next step — e.g. "have a lawyer review the specific clause," "file with SEBI's
+           SCORES portal," etc. — concrete, not just "consult a lawyer" restated.
+        Never draft or finalize binding legal language (contracts, notices) as if it's ready to file or
+        sign — frame any example text explicitly as an illustrative starting point for a real lawyer to review.
+    """,
+    output_key="legal_insight",
+)
+
+realtor_agent = SimpleAgent(
+    name="realtor_agent",
+    model=MODEL_NAME,
+    description=(
+        "Practical, buyer/seller-side realtor perspective on a SPECIFIC property purchase/sale/rental — "
+        "neighborhood fit, negotiation, listing search. Distinct from real_estate_agent, which analyzes "
+        "property as an investment asset class."
+    ),
+    instruction="""
+        You are a hands-on Realtor helping someone actually buy, sell, or rent a specific place — not
+        analyzing real estate as an asset class (that's the Real Estate Investment Analyst's job; if the
+        question is really "should I put my money in property vs other assets," say so and defer to that
+        framing being better suited elsewhere). Structure your answer:
+        1. What's being searched for / negotiated — restate the property need (city/locality, budget,
+           buy vs. rent, timeline) using what the user gave; ask only for what's essential if missing.
+        2. Neighborhood/locality fit — practical livability factors (commute, schools, amenities, safety,
+           upcoming infra) for the area named, using real, plausible localities if an Indian city is named.
+        3. Negotiation & process tips — realistic, actionable tactics (comparable listings, timing,
+           inspection contingencies, what's usually negotiable in that market).
+        4. Watch-outs — RERA registration (India), title verification, hidden costs (brokerage, society
+           transfer fees, stamp duty), things a first-time buyer/renter typically misses.
+        Keep it practical and concrete, not a return-on-investment analysis.
+    """,
+    output_key="realtor_insight",
+)
+
+cinema_agent = SimpleAgent(
+    name="cinema_agent",
+    model=MODEL_NAME,
+    description=(
+        "Film enthusiast — recommendations, reviews, discussion, trivia, 'what should I watch based on "
+        "my taste'. Distinct from leisure_agent, which handles showtimes/tickets/routes near the user."
+    ),
+    instruction="""
+        You are a genuine film enthusiast and critic — think a well-read cinephile friend, not a ticketing
+        app. You are NOT the showtimes/booking agent (that's leisure_agent) — if the user is actually
+        asking "what's playing near me right now" or wants a table of showtimes/theatres, say plainly
+        that's better handled as a showtimes lookup and give your best general answer without inventing
+        live showtimes yourself.
+
+        Give ONLY what was asked for this turn — no unrequested extra sections.
+
+        For recommendation requests ("what should I watch", "movies like X", "best films about Y"):
+        give 3-6 real, specific film titles with a one-line reason each tailored to what the user said
+        they like — never invent a film title.
+
+        For discussion/opinion/trivia requests (a director's style, a film's themes, "is X worth
+        watching"): give a genuine, opinionated, well-informed take — real critical engagement, not a
+        neutral plot summary.
+
+        CRITICAL — do not answer "what's new/current" from memory: your training data has a cutoff and
+        release slates change weekly. If REAL-TIME WEB CONTEXT is provided and relevant, prefer it for
+        anything about recent/current releases; if it's missing for a "what's new" style question, say
+        plainly you can't verify current releases and suggest checking a listings site, rather than
+        naming specific "new" titles from memory as if they're still in theatres.
+    """,
+    output_key="cinema_insight",
+)
+
+media_reporter_agent = SimpleAgent(
+    name="media_reporter_agent",
+    model=MODEL_NAME,
+    description=(
+        "Journalist-style news briefing — 'what's happening today', headline round-ups on markets/"
+        "business/current events. Reports what's out there rather than giving an investment opinion."
+    ),
+    instruction="""
+        You are a Media Reporter delivering a journalist-style news briefing — think a wire-service
+        market-open bulletin, not an opinion column. Report what's happening, attribute it neutrally,
+        and explicitly separate "what happened" from "what it might mean" (leave the "what should I do
+        about it" call to the finance specialists — you're reporting, not advising).
+
+        CRITICAL — never answer "what's happening today/this week" from memory: your training data has
+        a fixed cutoff. Only report items that appear in the REAL-TIME WEB CONTEXT block below. If that
+        block is missing, empty, or thin, say plainly that you don't have a live news feed to draw a
+        current briefing from right now, rather than reporting stale training-data events as if current.
+
+        Structure a briefing as a short, scannable set of headline bullets (one line each: what happened
+        + why it matters), most significant first, followed by one short closing line naming the overall
+        tone of the day if it's clear from the items (risk-on/risk-off/mixed) — do not editorialize beyond
+        that. If asked about one specific event rather than a general briefing, report just that item in
+        the same neutral, sourced style.
+    """,
+    output_key="media_reporter_insight",
+)
+
 # Not a finance agent — deliberately separate from the CFA/CFP team above.
 # "Movies", "restaurants nearby", "weekend plan", "long drive" etc. must land
 # here, never get force-fit into an equity/commodity lens (that was the bug:
@@ -371,7 +613,13 @@ leisure_agent = SimpleAgent(
            was unreachable) rather than inventing a route yourself — you have no reliable live
            traffic/road data of your own to fall back on for this one.
 
-        For non-movie, non-route leisure questions (restaurants, trips, weekend plans), give 3-5
+        4. "Hotels / places to stay / accommodation":
+           Use the 'get_hotel_availability' tool if the user provides a location (derive lat/long as best as possible) and dates.
+           Also use your live web search context to find internet scores/reviews for these hotels.
+           Generate the final result in a nice, precise tabular format containing: Hotel Name, Availability (Yes/No), Rooms Available, Lowest Rate, and Internet Score/Rating.
+           Do not invent hotel ratings—pull them strictly from web context or state they are unavailable.
+
+        For non-movie, non-route, non-hotel leisure questions (restaurants, trips, weekend plans), give 3-5
         concrete options with one short line each on why they fit — still no long-form report, no
         extra sections.
 
@@ -382,7 +630,7 @@ leisure_agent = SimpleAgent(
         don't have from REAL-TIME WEB CONTEXT.
     """,
     output_key="leisure_insight",
-    tools=["get_safe_route"],
+    tools=["get_safe_route", "get_hotel_availability"],
 )
 
 
@@ -466,6 +714,50 @@ async def _live_search_context_leisure(query: str) -> str:
         return ""
 
 
+async def _live_search_context_media(query: str) -> str:
+    """News-briefing-flavored live search for media_reporter_agent — asks for
+    dated, attributable headline items rather than a finance-only summary
+    (_live_search_context) or a leisure-only one, so a "what's happening
+    today" ask gets a genuine wire-style scan rather than a lens filtered
+    to just tradeable implications."""
+    if not ENABLE_LIVE_GROUNDING:
+        return ""
+    client = get_client()
+    today_str = datetime.now(IST).strftime("%A, %d %B %Y")
+    try:
+        resp = await client.aio.models.generate_content(
+            model=MODEL_NAME,
+            contents=(
+                f"Today's date is {today_str}. Search the web for the most current news headlines "
+                "relevant to this request — markets, business, and major current events as applicable. "
+                "Return a short list of concrete, dated headline items (not a vague thematic summary), "
+                "each with enough detail to report it accurately.\n\n"
+                f"Question: {query}"
+            ),
+            config=genai_types.GenerateContentConfig(
+                tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())]
+            ),
+        )
+        return (resp.text or "").strip()
+    except Exception as e:
+        logging.warning(f"Media live search grounding failed, continuing without it: {e}")
+        return ""
+
+
+# Domain groupings used to decide which flavor(s) of live-search grounding
+# a turn needs, and which query/context each agent in run_domain_agent gets.
+# REALTOR sits in FINANCE_DOMAINS (property-market conditions still route
+# through the finance-flavored search) even though its instruction is
+# deliberately non-investment in tone.
+FINANCE_DOMAINS = {
+    "EQUITY", "MUTUAL_FUNDS", "COMMODITY", "MACRO", "FIXED_INCOME", "REAL_ESTATE",
+    "FINANCIAL_PLANNING", "CHARTERED_FINANCE", "CHARTERED_ASSOCIATE", "QUANTS",
+    "FINANCE_ANALYST", "INSURANCE", "LEGAL", "REALTOR",
+}
+LEISURE_DOMAINS = {"LEISURE", "CINEMA"}
+MEDIA_DOMAINS = {"MEDIA_REPORTER"}
+
+
 _ALLOCATION_INTENT_KEYWORDS = (
     "invest", "allocate", "allocation", "portfolio", "diversify", "diversification",
     "where should i put", "where to put my money", "asset mix", "asset allocation",
@@ -503,8 +795,11 @@ class Synthesizer:
 
     async def generate_content_async(self, prompt):
         system_instruction = """
-            You are the Chief Investment Officer (CIO) leading a team of CFA/CFP domain specialists
-            (Equity, Mutual Funds, Commodities, Macro, Fixed Income, Real Estate, Financial Planning).
+            You are the Chief Investment Officer (CIO) leading a cross-functional team of specialists:
+            CFA/CFP domain analysts (Equity, Mutual Funds, Commodities, Macro, Fixed Income, Real Estate,
+            Financial Planning, Chartered Finance strategist, Finance Analyst, Quants Analyst), a
+            Chartered Accountant (tax/accounting), an Insurance Analyst, a Lawyer (legal perspective),
+            a Realtor, a Cinema enthusiast, and a Media Reporter.
             Synthesize their insights into ONE deep, well-organized, actionable answer for the user —
             do not just summarize each specialist in isolation; weave their findings together, resolve
             any contradictions between them, and be explicit about numbers, trade-offs, and risks.
@@ -532,6 +827,12 @@ class Synthesizer:
                one — the leisure agent already owns tone for those), close with one brief, natural line
                noting there's nothing to act on until the next session and the user need not watch prices
                until then. Skip this if the query was leisure-only or if no MARKET SESSION block is given.
+            3. Disclaimers stay attached: if the Lawyer's or Insurance Analyst's insight opens with a
+               disclaimer ("not a licensed attorney" / "not a licensed insurance advisor"), preserve that
+               disclaimer's substance in the synthesized answer near their contribution — do not smooth it
+               away for tone. Cinema and Media Reporter insights are not investment analysis; keep them
+               clearly separated from the financial specialists' numbers rather than blended into one
+               undifferentiated "expert view."
         """
         response = await self.client.aio.models.generate_content(
             model=MODEL_NAME,
@@ -557,7 +858,16 @@ class Orchestrator:
             "FIXED_INCOME": fixed_income_agent,
             "REAL_ESTATE": real_estate_agent,
             "FINANCIAL_PLANNING": financial_planning_agent,
+            "CHARTERED_FINANCE": chartered_finance_agent,
+            "CHARTERED_ASSOCIATE": chartered_associate_agent,
+            "QUANTS": quants_agent,
+            "FINANCE_ANALYST": finance_analyst_agent,
+            "INSURANCE": insurance_agent,
+            "LEGAL": legal_agent,
+            "REALTOR": realtor_agent,
             "LEISURE": leisure_agent,
+            "CINEMA": cinema_agent,
+            "MEDIA_REPORTER": media_reporter_agent,
         }
         
     async def process_query_async(self, query: str, location: str = None, history: list = None) -> tuple[str, dict | None]:
@@ -577,20 +887,19 @@ class Orchestrator:
         router_prompt = f"""
         Determine which expert agents are needed to answer the user's latest message.
         {history_block}
-        First check: is this actually about investing, markets, or personal finance at all?
+        First check: is this actually about investing, markets, personal finance, tax/accounting,
+        insurance, legal/regulatory matters, or a property purchase — or is it leisure/media instead?
         Movies, restaurants, weekend plans, travel/getaways, long drives, "what should I do
         today/this weekend" — none of these are finance questions, even if they mention a
         company name in passing (e.g. "movies" is never about movie-studio stocks unless the
-        user explicitly asks about investing in one). Route ALL of these to LEISURE alone —
-        do not also add a finance domain just because the topic could theoretically be
-        analyzed as an industry.
+        user explicitly asks about investing in one).
 
         The latest message may be short and only make sense in light of the recent
         conversation above — e.g. if the assistant's last turn asked "which city are you
         in?" as part of a movie/restaurant/leisure question, and the latest message is just
         a place name, that is a continuation of the SAME leisure question, not a new,
         standalone query about that place (do not route a bare location reply to
-        REAL_ESTATE or any finance domain just because it names a place).
+        REAL_ESTATE/REALTOR or any finance domain just because it names a place).
 
         BARE ACKNOWLEDGMENTS ("go ahead", "sure", "yes", "ok", "let's do it") that continue a
         prior turn where the assistant offered a menu of specific named options (e.g. "market
@@ -607,10 +916,38 @@ class Orchestrator:
         questions, need REAL_ESTATE — but do not add REAL_ESTATE to a narrow question about a
         specific stock, market movers, or IPOs just because markets are down that day.
 
+        DISAMBIGUATION for the newer, easily-confused domains — pick the single best-fitting one(s),
+        do not add every plausible domain "just in case":
+        - EQUITY vs CHARTERED_FINANCE: a specific stock/company question is EQUITY. A broad "what
+          should my overall portfolio/strategy be" or multi-asset allocation-strategy question (without
+          one specific stock as the subject) is CHARTERED_FINANCE.
+        - EQUITY vs FINANCE_ANALYST: "should I buy/is this a good investment" is EQUITY. "What do this
+          company's numbers/financials/earnings actually look like" (fundamentals read, not a buy call)
+          is FINANCE_ANALYST.
+        - QUANTS: only for genuinely quantitative asks — Sharpe/Sortino ratio, volatility/VaR,
+          correlation, options/derivatives pricing/greeks, backtest-style statistical reasoning.
+        - CHARTERED_ASSOCIATE: tax or accounting treatment specifically — capital gains tax, TDS, GST,
+          ITR filing, indexation, tax-loss harvesting.
+        - INSURANCE: life/health/term/vehicle/property insurance coverage, premiums, claims, policy
+          comparison.
+        - LEGAL: legal/regulatory/compliance/contract/dispute questions (SEBI conduct rules, RERA
+          compliance, contract clauses, consumer disputes) needing a legal-opinion framing.
+        - REAL_ESTATE vs REALTOR: property as an INVESTMENT/asset-allocation decision (returns, yield,
+          buy-vs-rent-vs-invest-elsewhere) is REAL_ESTATE. A SPECIFIC property purchase/sale/rental —
+          neighborhood fit, negotiation, listing search, process — is REALTOR. A single message can need
+          both only if it genuinely asks both things.
+        - LEISURE vs CINEMA: "what's playing near me" / showtimes / tickets / routes / restaurants /
+          trips is LEISURE. Film recommendations, reviews, discussion, "movies like X", director/genre
+          opinions is CINEMA.
+        - MEDIA_REPORTER: "what's happening today/this week", a news/headline briefing request — not a
+          request for analysis or a recommendation, just reporting.
+
         Latest message: "{query}"
         Respond with a JSON object of the form {{"routes": [...]}}, where the array contains one or more of
         the following strings exactly:
-        "EQUITY", "MUTUAL_FUNDS", "COMMODITY", "MACRO", "FIXED_INCOME", "REAL_ESTATE", "FINANCIAL_PLANNING", "LEISURE".
+        "EQUITY", "MUTUAL_FUNDS", "COMMODITY", "MACRO", "FIXED_INCOME", "REAL_ESTATE", "FINANCIAL_PLANNING",
+        "CHARTERED_FINANCE", "CHARTERED_ASSOCIATE", "QUANTS", "FINANCE_ANALYST", "INSURANCE", "LEGAL",
+        "REALTOR", "LEISURE", "CINEMA", "MEDIA_REPORTER".
         Return ONLY the JSON object.
         """
         router = get_router()
@@ -625,13 +962,15 @@ class Orchestrator:
             routes = ["EQUITY", "MACRO"]
 
         location_note = f"\n\n(User's approximate current location: {location})" if location else ""
-        leisure_query = query + location_note + history_block if "LEISURE" in routes else query
-        # Finance domain agents get history too now, not just leisure — a
+        needs_leisure_ctx = any(r in LEISURE_DOMAINS for r in routes)
+        leisure_query = query + location_note + history_block if needs_leisure_ctx else query
+        # Finance-ish domain agents get history too now, not just leisure — a
         # bare "go ahead"/"sure" continuing a prior turn is meaningless to
         # an agent that only sees that one word. Without this, a narrowly-
         # routed agent (e.g. EQUITY alone) still can't tell what the user
         # is agreeing to.
         finance_query = query + history_block if history_block else query
+        media_query = query + history_block if history_block else query
 
         # Step 1.5: Cross-domain context ("Liquidity & Leisure" bridges) — cheap,
         # non-LLM lookups computed once per turn and shared by every domain
@@ -639,23 +978,36 @@ class Orchestrator:
         session_state = _market_session_state()
         session_block = f"MARKET SESSION: {session_state['label']} ({session_state['time_ist']})"
 
-        is_finance_turn = routes != ["LEISURE"]
+        needs_finance_ctx = any(r in FINANCE_DOMAINS for r in routes)
+        needs_media_ctx = any(r in MEDIA_DOMAINS for r in routes)
         macro_mood = None
         macro_block = ""
 
-        # Step 2: One live-search grounding pass, shared by every domain agent
-        # below, so a query like "is X still private" or "current price of Y"
-        # doesn't get answered from stale training-data memory. Leisure-only
-        # turns get the leisure-flavored search instead of the finance one,
-        # and fold in the browser-supplied location and recent history (if
-        # any) so "movies near me" — or a bare city name following it — can
-        # actually search near the user instead of nowhere.
-        if is_finance_turn:
-            # Live web-search grounding and the macro mood score don't depend
-            # on each other — fetch both concurrently.
-            live_context, macro_mood = await asyncio.gather(
-                _live_search_context(query), _get_macro_mood(),
-            )
+        # Step 2: Live-search grounding, in whichever flavor(s) this turn's
+        # routes actually need — fetched concurrently so a mixed turn (e.g.
+        # EQUITY + MEDIA_REPORTER) doesn't pay for the fetches serially.
+        # Each domain group gets its own flavored search so a finance
+        # question isn't fed leisure/news noise and vice versa.
+        fetch_jobs: dict = {}
+        if needs_finance_ctx:
+            fetch_jobs["finance"] = _live_search_context(query)
+            fetch_jobs["macro"] = _get_macro_mood()
+        if needs_leisure_ctx:
+            fetch_jobs["leisure"] = _live_search_context_leisure(leisure_query)
+        if needs_media_ctx:
+            fetch_jobs["media"] = _live_search_context_media(media_query)
+
+        if fetch_jobs:
+            fetched = dict(zip(fetch_jobs.keys(), await asyncio.gather(*fetch_jobs.values())))
+        else:
+            fetched = {}
+
+        live_context_finance = fetched.get("finance", "")
+        live_context_leisure = fetched.get("leisure", "")
+        live_context_media = fetched.get("media", "")
+        macro_mood = fetched.get("macro")
+
+        if macro_mood:
             macro_block = _format_macro_mood_block(macro_mood)
             # Real Estate ↔ Quant Engine crossover: worth raising ONLY when
             # the user is already asking a broad capital-allocation/"where
@@ -670,8 +1022,6 @@ class Orchestrator:
             wants_allocation_view = "FINANCIAL_PLANNING" in routes or _mentions_allocation_intent(query)
             if macro_mood.get("bias") == "BEARISH" and wants_allocation_view and "REAL_ESTATE" not in routes:
                 routes = routes + ["REAL_ESTATE"]
-        else:
-            live_context = await _live_search_context_leisure(leisure_query)
 
         # Step 3: Dynamic Parallel Execution of Domain Agents
         # Captures source/destination whenever leisure_agent successfully calls
@@ -689,12 +1039,27 @@ class Orchestrator:
             client = get_client()
             tool_names = getattr(agent, "tools", None) or []
             tool = _build_tool(tool_names)
-            preamble = "" if agent.name == "leisure_agent" else GROUNDING_PREAMBLE
+            is_leisure_like = agent_name in LEISURE_DOMAINS
+            is_media_like = agent_name in MEDIA_DOMAINS
+            # Leisure/cinema agents carry their own strict "don't invent from
+            # memory" rules inline in their instructions; the media reporter
+            # gets the same grounding-preamble treatment as finance agents
+            # since it's equally vulnerable to stale-memory "reporting".
+            preamble = "" if is_leisure_like else GROUNDING_PREAMBLE
             config_kwargs = {"system_instruction": preamble + agent.instruction}
             if tool:
                 config_kwargs["tools"] = [tool]
 
-            agent_query = leisure_query if agent.name == "leisure_agent" else finance_query
+            if is_leisure_like:
+                agent_query = leisure_query
+                live_context = live_context_leisure
+            elif is_media_like:
+                agent_query = media_query
+                live_context = live_context_media
+            else:
+                agent_query = finance_query
+                live_context = live_context_finance
+
             contents = []
             if live_context:
                 contents.append(genai_types.Content(role="user", parts=[genai_types.Part(text=
@@ -702,10 +1067,11 @@ class Orchestrator:
                     f"than your training data; trust this over your own memory if they conflict):\n"
                     f"{live_context}"
                 )]))
-            # Liquidity & Leisure crossovers: leisure gets the market-session
-            # state (for the closure-workflow tone), finance agents get the
-            # macro mood score (for the real-estate rotation trigger).
-            if agent.name == "leisure_agent":
+            # Liquidity & Leisure crossovers: leisure/cinema get the
+            # market-session state (for the closure-workflow tone), finance-
+            # ish agents get the macro mood score (for the real-estate
+            # rotation trigger).
+            if is_leisure_like:
                 contents.append(genai_types.Content(role="user", parts=[genai_types.Part(text=session_block)]))
             elif macro_block:
                 contents.append(genai_types.Content(role="user", parts=[genai_types.Part(text=macro_block)]))
@@ -804,3 +1170,81 @@ class Orchestrator:
         # event loop instead. Kept only for any other sync caller; do not
         # add new uses.
         return asyncio.run(self.process_query_async(query, location=location, history=history))
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Journal companion — multi-turn Gemini conversation + summarization,
+# satisfying the ideathon's "multi-turn interaction with Gemini API for
+# journaling" requirement directly (separate from the CFA/multi-agent chat
+# above, which is oriented around a single deep answer per turn rather than
+# an ongoing reflective conversation). Uses the same Vertex AI client/model
+# as everything else in this file — no extra secret/config needed.
+# ─────────────────────────────────────────────────────────────────────────
+JOURNAL_SYSTEM_INSTRUCTION = """
+You are a thoughtful personal journaling companion focused on the user's financial life —
+trades, portfolio decisions, money habits, and how they're feeling about them. You are not
+a financial advisor giving recommendations here; your job is to help the user reflect, ask
+good follow-up questions, and help them notice patterns in their own thinking over time.
+Keep replies conversational and concise (a few sentences, not an essay), and end with a
+short, genuine follow-up question more often than not, the way a good journaling prompt would.
+"""
+
+JOURNAL_SUMMARY_INSTRUCTION = """
+Summarize the following journal conversation in 2-4 sentences, in the third person, capturing
+the key themes, decisions, or feelings the user expressed — the kind of summary the user would
+find useful skimming back over a month of entries. Do not invent details that weren't said.
+Return plain text only, no headers or markdown.
+"""
+
+
+def _history_to_contents(history: list[dict]) -> list:
+    """Converts a stored [{"role": "user"|"model", "text": ...}, ...] list into
+    genai_types.Content objects for a multi-turn call. Unknown roles fall back
+    to "user" so a malformed stored entry can't silently get dropped."""
+    contents = []
+    for turn in history or []:
+        role = turn.get("role") if turn.get("role") in ("user", "model") else "user"
+        text = turn.get("text", "")
+        if text:
+            contents.append(genai_types.Content(role=role, parts=[genai_types.Part(text=text)]))
+    return contents
+
+
+async def journal_reply_async(history: list[dict]) -> str:
+    """Takes the full stored conversation (including the just-appended latest
+    user turn) and returns the model's next reply — genuine multi-turn, since
+    the whole history is replayed as the conversation each time (Gemini's
+    generateContent is stateless server-side; multi-turn is achieved by
+    resending prior turns, same pattern Vertex AI's own chat sessions use
+    under the hood)."""
+    client = get_client()
+    contents = _history_to_contents(history)
+    if not contents:
+        return "I didn't catch anything to respond to — what's on your mind?"
+    resp = await client.aio.models.generate_content(
+        model=MODEL_NAME,
+        contents=contents,
+        config=genai_types.GenerateContentConfig(system_instruction=JOURNAL_SYSTEM_INSTRUCTION),
+    )
+    return (resp.text or "").strip()
+
+
+async def journal_summary_async(history: list[dict]) -> str:
+    """Produces the concise summary described in docs/architecture_blueprint.md
+    step 3 ('a background worker requests a concise summary from Gemini'),
+    called after a chat turn via FastAPI BackgroundTasks — see
+    routers/journals.py."""
+    client = get_client()
+    contents = _history_to_contents(history)
+    if not contents:
+        return ""
+    try:
+        resp = await client.aio.models.generate_content(
+            model=MODEL_NAME,
+            contents=contents,
+            config=genai_types.GenerateContentConfig(system_instruction=JOURNAL_SUMMARY_INSTRUCTION),
+        )
+        return (resp.text or "").strip()
+    except Exception as e:
+        logging.warning(f"Journal summary generation failed, continuing without it: {e}")
+        return ""

@@ -59,14 +59,26 @@ with info_col:
     else:
         st.warning("No refresh has run yet — the cache is empty, so the table below has nothing to show. Click 'Populate now' →")
 with btn_col:
-    if st.button("⚡ Populate now (full)", use_container_width=True, help="Runs a full pass over every AMFI scheme right now (~2,500 schemes, each needing a NAV-history fetch — can take well over an hour)."):
-        with st.spinner("Fetching the full AMFI universe — this can take an hour or more. Don't close this tab."):
-            try:
-                requests.post(f"{BACKEND_URL}/api/mutual-funds/refresh", params={"full": True}, timeout=3600)
-            except Exception as e:
-                st.warning(f"Request ended early ({e}) — expected if the backend's timeout is still at its default 300s, "
-                           "or if one full pass genuinely needs longer than the 3600s ceiling a Cloud Run HTTP service allows. "
-                           "Progress is committed incrementally, so whatever finished is already saved. Click again to continue from there.")
+    if st.button("⚡ Populate now (full)", use_container_width=True, help="Runs a full pass over every AMFI scheme right now (~2,500 schemes). Uses incremental client-side batching to bypass Cloud Run timeouts."):
+        progress_text = "Populating AMFI universe..."
+        my_bar = st.progress(0.0, text=progress_text)
+        try:
+            while True:
+                resp = requests.post(f"{BACKEND_URL}/api/mutual-funds/refresh", params={"full": False, "batch_size": 5}, timeout=120)
+                if resp.status_code != 200:
+                    st.error(f"Backend error: {resp.text}")
+                    break
+                data = resp.json()
+                cursor = data.get("cursor", 0)
+                total = data.get("universe_size", 1)
+                
+                pct = min(1.0, max(0.0, cursor / total)) if total > 0 else 0.0
+                my_bar.progress(pct, text=f"{progress_text} {cursor:,} / {total:,} schemes")
+                
+                if data.get("wrapped_full_pass"):
+                    break
+        except Exception as e:
+            st.error(f"Populate interrupted: {e}")
         st.cache_data.clear()
         st.rerun()
 st.caption("One-time setup for automatic nightly refresh: raise the backend's request timeout "

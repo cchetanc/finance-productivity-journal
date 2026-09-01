@@ -70,11 +70,13 @@ class RiskLimits:
 class AlgoExecution:
     """Runtime + persisted state for a single algo run."""
 
-    def __init__(self, execution_id: str, uid: str, algo_type: AlgoType, params: AlgoParams):
+    def __init__(self, execution_id: str, uid: str, algo_type: AlgoType, params: AlgoParams,
+                 mode: str = "PAPER"):
         self.execution_id = execution_id
         self.uid = uid
         self.algo_type = algo_type
         self.params = params
+        self.mode = mode
         self.status = ExecutionStatus.PENDING
         self.child_orders: list[OrderResult] = []
         self.error_message: Optional[str] = None
@@ -102,6 +104,7 @@ class AlgoExecution:
         return {
             "execution_id": self.execution_id,
             "uid": self.uid,
+            "mode": self.mode,
             "algo_type": self.algo_type.value,
             "symbol": self.params.symbol,
             "exchange": self.params.exchange,
@@ -150,9 +153,10 @@ class ExecutionEngine:
         execution.request_stop()
         return True
 
-    async def start(self, uid: str, algo_type: AlgoType, params: AlgoParams) -> AlgoExecution:
+    async def start(self, uid: str, algo_type: AlgoType, params: AlgoParams,
+                     mode: str = "PAPER") -> AlgoExecution:
         execution_id = str(uuid.uuid4())
-        execution = AlgoExecution(execution_id, uid, algo_type, params)
+        execution = AlgoExecution(execution_id, uid, algo_type, params, mode=mode)
         self._executions[execution_id] = execution
         self._persist(execution)
 

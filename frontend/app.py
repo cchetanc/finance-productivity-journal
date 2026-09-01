@@ -7,6 +7,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 import requests
 
+from trade_terminal_widget import render_trade_terminal
+
 try:
     import ephem
 except ImportError:
@@ -449,6 +451,11 @@ div[class*="st-key-equity_side_box"] a[data-testid="stPageLink-NavLink"] p {
         st.page_link("pages/2_Mutual_Funds.py", label="Mutual Funds", icon="💰")
         st.page_link("pages/3_Dividends_and_Corporate_Actions.py", label="Dividends & Corp Actions", icon="📢")
         st.page_link("pages/4_Results_Calendar.py", label="Results Calendar", icon="📅")
+
+# ── TRADE EXECUTION TERMINAL — right below Live Market Sentiment ────────────
+st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+render_trade_terminal(BACKEND_URL, show_title=True)
+st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
 # ── ROW 2: HEADLINES (GLOBAL / NATIONAL / LOCAL) + NEW RELEASES ──────────────
 # Four small, independent tiles instead of one wide combined card: three

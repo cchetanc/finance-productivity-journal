@@ -5,9 +5,10 @@ from firebase_admin import credentials, auth
 
 # Initialize Firebase Admin if not already initialized
 if not firebase_admin._apps:
-    # Use default credentials (e.g., in Cloud Run) or a service account 
-    # injected securely, NEVER hardcoded.
+    # Use default credentials for the database (gen-lang-client...)
     default_app = firebase_admin.initialize_app()
+    # Create a secondary app specifically for authenticating tokens from the frontend's Firebase project
+    auth_app = firebase_admin.initialize_app(options={"projectId": "my-finance-terminal-auth"}, name="frontend_auth")
 
 security = HTTPBearer()
 
@@ -18,7 +19,8 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) 
     """
     token = credentials.credentials
     try:
-        decoded_token = auth.verify_id_token(token)
+        # Verify using the specific app instance bound to the frontend's Firebase project
+        decoded_token = auth.verify_id_token(token, app=firebase_admin.get_app("frontend_auth"))
         uid = decoded_token.get("uid")
         if not uid:
             raise ValueError("Token does not contain uid")

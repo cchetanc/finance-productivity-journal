@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from app import auth, database, models, gemini, sentiment
-from app.routers import market, journals, screener, mutual_funds, corporate_actions, trading
+from app.routers import market, journals, screener, mutual_funds, corporate_actions, trading, hotels
 
 app = FastAPI(title="Finance Productivity Journal API")
 
@@ -10,6 +10,7 @@ app.include_router(screener.router)
 app.include_router(mutual_funds.router)
 app.include_router(corporate_actions.router)
 app.include_router(trading.router)
+app.include_router(hotels.router)
 
 
 @app.on_event("startup")
