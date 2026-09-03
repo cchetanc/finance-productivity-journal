@@ -84,6 +84,72 @@ def save_journal_summary(uid: str, journal_id: str, summary: str):
         merge=True,
     )
 
+def get_daily_chat_ref(uid: str, date_str: str):
+    """
+    Returns a document reference for one calendar day's Daily Productivity
+    Assistant chat. Path: /users/{uid}/daily_chat/{YYYY-MM-DD} (IST date).
+    Crossing midnight IST means the next message lands in a brand-new doc —
+    that's what makes "today starts fresh, yesterday stays put" work without
+    any explicit archiving/cleanup step.
+    """
+    return db.collection("users").document(uid).collection("daily_chat").document(date_str)
+
+
+def get_daily_chat(uid: str, date_str: str) -> dict:
+    """
+    Returns {"messages": [...], "phases_sent": [...]} for the given day,
+    or empty defaults if nothing has been stored yet for that day.
+    """
+    doc = get_daily_chat_ref(uid, date_str).get()
+    if not doc.exists:
+        return {"messages": [], "phases_sent": []}
+    data = doc.to_dict() or {}
+    return {
+        "messages": data.get("messages", []),
+        "phases_sent": data.get("phases_sent", []),
+    }
+
+
+def append_daily_chat_message(uid: str, date_str: str, role: str, text: str, route: dict | None = None) -> list:
+    """
+    Appends one {"role", "text", "timestamp"} turn to today's stored chat
+    and returns the updated, full message list for that day. `role` is
+    "user" or "cfa" (matches the frontend's voice_history shape so it can
+    be loaded back in directly without any translation).
+    """
+    import datetime
+    doc_ref = get_daily_chat_ref(uid, date_str)
+    doc = doc_ref.get()
+    existing = doc.to_dict() if doc.exists else {}
+    messages = existing.get("messages", [])
+    entry = {
+        "role": role,
+        "text": text,
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+    }
+    if route:
+        entry["route"] = route
+    messages.append(entry)
+    doc_ref.set({**existing, "messages": messages}, merge=True)
+    return messages
+
+
+def mark_daily_chat_phase_sent(uid: str, date_str: str, phase: str):
+    """
+    Records that the proactive greeting for a given market 'phase'
+    (PRE_MARKET / MARKET_HOURS / POST_MARKET / WEEKEND) has already been
+    sent today, so the panel doesn't push the same kind of proactive
+    message again on every reconnect within the same phase.
+    """
+    doc_ref = get_daily_chat_ref(uid, date_str)
+    doc = doc_ref.get()
+    existing = doc.to_dict() if doc.exists else {}
+    phases_sent = existing.get("phases_sent", [])
+    if phase not in phases_sent:
+        phases_sent.append(phase)
+    doc_ref.set({**existing, "phases_sent": phases_sent}, merge=True)
+
+
 def get_trade_ref(uid: str, trade_id: str):
     """
     Returns a document reference for a specific trade.

@@ -3,9 +3,18 @@ from urllib.parse import urlparse
 import streamlit as st
 import requests
 
+from auth_helper import login_widget
+from ui_helpers import hide_streamlit_chrome, render_page_nav
+
 BACKEND_URL = "https://finance-prod-app-backend-36680800010.asia-south1.run.app"
 
-st.set_page_config(page_title="Dividends & Corporate Actions", layout="wide")
+st.set_page_config(page_title="Dividends & Corporate Actions", layout="wide", initial_sidebar_state="collapsed")
+hide_streamlit_chrome()
+
+if not login_widget(BACKEND_URL):
+    st.stop()
+
+render_page_nav()
 
 st.title("📢 Dividends & Corporate Actions")
 st.caption(

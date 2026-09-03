@@ -11,11 +11,17 @@ yfinance==1.7.0
 requests==2.32.3
 feedparser==6.0.14
 transformers==4.46.3
-torch==2.5.1
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
 python-dotenv==1.0.1
 streamlit==1.62.0
 google-cloud-speech
 google-cloud-texttospeech
+
+# Gmail UPI-spending integration (see app/gmail_spending.py)
+google-auth
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.149.0
 
 # Trading / algo execution
 smartapi-python==1.5.5

@@ -7,7 +7,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import requests
 
-from trade_terminal_widget import render_trade_terminal
+from auth_helper import login_widget, is_logged_in, logout, get_role, get_id_token, get_features
 
 try:
     import ephem
@@ -58,6 +58,73 @@ iframe { display: block; }
 </style>
 """, unsafe_allow_html=True)
 
+def _svg_price_chart(history: list, width: int = 560, height: int = 150) -> str:
+    """Renders a 1-year daily-close line chart as inline SVG (green line +
+    gradient fill under it, matching the app's own accent color, plus a
+    handful of evenly-spaced month labels) — no plotting library needed,
+    and it fits the app's existing dark theme better than Streamlit's
+    default chart widgets would. Not interactive (no hover/range-toggle) —
+    a fixed 1-year view, same period the backend fetches."""
+    closes = [h.get("close") for h in (history or []) if h.get("close") is not None]
+    dates = [h.get("date") for h in (history or []) if h.get("close") is not None]
+    if len(closes) < 2:
+        return ""
+
+    lo, hi = min(closes), max(closes)
+    span = (hi - lo) or 1
+    pad_top, pad_bottom = 8, 22
+    plot_h = height - pad_top - pad_bottom
+    n = len(closes)
+
+    def xy(i, v):
+        x = (i / (n - 1)) * width
+        y = pad_top + (1 - (v - lo) / span) * plot_h
+        return x, y
+
+    pts = [xy(i, v) for i, v in enumerate(closes)]
+    line_pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    area_pts = f"0,{height - pad_bottom} " + line_pts + f" {width},{height - pad_bottom}"
+    last_x, last_y = pts[-1]
+
+    tick_idxs = sorted(set([0, n // 3, (2 * n) // 3, n - 1]))
+    ticks_svg = ""
+    for idx in tick_idxs:
+        tx, _ = pts[idx]
+        try:
+            label = datetime.datetime.strptime(dates[idx], "%Y-%m-%d").strftime("%b %Y")
+        except Exception:
+            label = ""
+        ticks_svg += f'<text x="{tx:.1f}" y="{height - 6}" font-size="9" fill="#8a7d5f" text-anchor="middle">{html.escape(label)}</text>'
+
+    return f'''
+<svg viewBox="0 0 {width} {height}" width="100%" height="{height}" preserveAspectRatio="none" style="display:block;">
+  <defs>
+    <linearGradient id="priceFill{n}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#8fae64" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#8fae64" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <polygon points="{area_pts}" fill="url(#priceFill{n})" stroke="none"/>
+  <polyline points="{line_pts}" fill="none" stroke="#8fae64" stroke-width="1.6"/>
+  <circle cx="{last_x:.1f}" cy="{last_y:.1f}" r="3.2" fill="#8fae64"/>
+  {ticks_svg}
+</svg>
+'''
+
+
+# ── AUTH GATE (app-wide — not just the trade terminal) ─────────────────────────
+# Every page in this app requires a signed-in @gmail.com account. Sign-in AND
+# self-serve sign-up both happen here, right at the top of the app, via
+# Firebase Auth (Identity Toolkit REST API) — see frontend/auth_helper.py.
+if not login_widget(BACKEND_URL):
+    st.stop()
+
+# ── PER-USER FEATURE FLAGS (Admin RBAC — see pages/6_admin.py) ──────────────
+# Controls which of the sections below even render for this account.
+# daily_productivity defaults True for everyone; the rest default off until
+# an admin switches them on for a given user.
+_features = get_features()
+
 # ── SESSION STATE ──────────────────────────────────────────────────────────────
 for key in ("v_mood", "v_news", "v_headlines", "v_entertainment"):
     if key not in st.session_state:
@@ -97,6 +164,10 @@ IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 _now_ist = datetime.datetime.now(IST)
 _tithi_str = get_tithi(datetime.datetime.now(datetime.timezone.utc))
 _date_str = _now_ist.strftime("%A, %d %B %Y")
+# ISO date key (IST), same format backend/app/market_briefing.py's
+# today_ist_str() uses — the shared "which calendar day is this" key for
+# the Daily Productivity Assistant's persisted chat (see _load_daily_chat).
+_today_ist_key = _now_ist.strftime("%Y-%m-%d")
 
 # Gold/Silver pull in ahead of the header render since the header itself is
 # a single static components.html block — see fetch_precious_metals below
@@ -186,6 +257,25 @@ function fjTick() {{
 fjTick(); setInterval(fjTick, 1000);
 </script>
 """, height=76)
+
+# ── ACCOUNT BAR ─────────────────────────────────────────────────────────────────
+_is_admin_user = get_role() == "admin"
+if _is_admin_user:
+    _acct_l, _acct_mid, _acct_r = st.columns([7, 1.6, 1.4])
+    with _acct_mid:
+        # Only entry point into pages/6_admin.py from the home page — the
+        # page itself is reachable by URL too, but without this link an
+        # admin has no way to discover it short of already knowing the path.
+        st.page_link("pages/6_admin.py", label="🛡️ Admin", help="Control what each user's home page shows")
+else:
+    _acct_l, _acct_r = st.columns([8, 1.4])
+with _acct_l:
+    _role_tag = " · Admin" if _is_admin_user else ""
+    st.caption(f"Signed in as {st.session_state.get('fb_email', '')}{_role_tag}")
+with _acct_r:
+    if st.button("Sign out", key="app_signout"):
+        logout()
+        st.rerun()
 
 # ── DATA FETCHERS ──────────────────────────────────────────────────────────────
 @st.cache_data(ttl=60)
@@ -295,10 +385,13 @@ components.html(f"""
 <div class="ticker-box"><div class="ticker-track">{_ticker_syms}{_ticker_syms}</div></div>
 """, height=34)
 
-# ── ROW 1: SENTIMENT PANEL + LIVE WIRE ────────────────────────────────────────
-col1, col2, col_equity = st.columns([1, 1.5, 0.9])
-
-with col1:
+# ── ROW 1: SENTIMENT PANEL + LIVE WIRE + EQUITY SIDE ─────────────────────────
+# Each panel is its own function now (rather than a bare `with col:` block)
+# so it can be skipped entirely, per-user, based on the admin-configured
+# feature flags (see auth_helper.get_features / the Admin RBAC page) —
+# the surrounding st.columns() layout is only built with the slots that
+# are actually enabled, right below these three defs.
+def _render_sentiment_panel():
     hdr, btn = st.columns([6, 1])
     with hdr:
         st.markdown('<p style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:#a99872;text-transform:uppercase;margin:0 0 5px 0;">◎ Live Market Sentiment</p>', unsafe_allow_html=True)
@@ -333,7 +426,7 @@ with col1:
 </div>
 """, height=276)
 
-with col2:
+def _render_live_wire():
     hdr, btn = st.columns([6, 1])
     with hdr:
         st.markdown('<p style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:#a99872;text-transform:uppercase;margin:0 0 5px 0;">((•)) Live Wire — FinBERT Scored</p>', unsafe_allow_html=True)
@@ -400,7 +493,7 @@ with col2:
 </div>
 """, height=276)
 
-with col_equity:
+def _render_equity_side():
     st.markdown('<p style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:#a99872;text-transform:uppercase;margin:0 0 5px 0;">📈 Equity Side</p>', unsafe_allow_html=True)
     st.markdown("""
 <style>
@@ -416,6 +509,7 @@ div[class*="st-key-equity_side_box"] {
     border-radius: 8px !important;
     padding: 16px 14px 10px 14px !important;
     height: 258px !important;
+    overflow-y: auto !important;
 }
 div[class*="st-key-equity_side_box"] > div {
     height: 100% !important;
@@ -451,13 +545,30 @@ div[class*="st-key-equity_side_box"] a[data-testid="stPageLink-NavLink"] p {
         st.page_link("pages/2_Mutual_Funds.py", label="Mutual Funds", icon="💰")
         st.page_link("pages/3_Dividends_and_Corporate_Actions.py", label="Dividends & Corp Actions", icon="📢")
         st.page_link("pages/4_Results_Calendar.py", label="Results Calendar", icon="📅")
+        # Trade Terminal used to render inline, full-width, right below this
+        # row — now it's just another Equity Side destination, so it only
+        # loads when someone actually wants it (see pages/5_trade_terminal.py).
+        st.page_link("pages/5_trade_terminal.py", label="Trade Terminal", icon="⚡")
 
-# ── TRADE EXECUTION TERMINAL — right below Live Market Sentiment ────────────
-st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-render_trade_terminal(BACKEND_URL, show_title=True)
-st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
-# ── ROW 2: HEADLINES (GLOBAL / NATIONAL / LOCAL) + NEW RELEASES ──────────────
+# ── Build row 1 with only the panels this user is allowed to see ────────────
+# Each entry is (render_fn, relative_width). equity_news controls the
+# sentiment + live-wire pair; smart_investor controls the equity side box —
+# they're independent, so any combination (both, either, neither) is valid,
+# and the st.columns() call below only ever gets the slots that are on.
+_row1_parts = []
+if _features.get("equity_news"):
+    _row1_parts.append((_render_sentiment_panel, 1))
+    _row1_parts.append((_render_live_wire, 1.5))
+if _features.get("smart_investor"):
+    _row1_parts.append((_render_equity_side, 0.9))
+
+if _row1_parts:
+    _row1_cols = st.columns([w for _, w in _row1_parts])
+    for (_fn, _w), _col in zip(_row1_parts, _row1_cols):
+        with _col:
+            _fn()
+
 # Four small, independent tiles instead of one wide combined card: three
 # equal-width news tiles (Global, National, Local) plus a compact "New
 # Releases" tile covering theatres and OTT platforms (Netflix, Prime,
@@ -510,31 +621,34 @@ def _news_tile(container, icon: str, label: str, rows_html: str, key_suffix: str
 
 
 _news_city = st.session_state.get("user_location") or ""
-_news = fetch_categorized_news(st.session_state.v_headlines, _news_city)
-_local_rows = _headline_rows(_news.get("local")) if _news_city else (
-    '<div style="color:#6b5c40;font-size:11px;padding:4px 0;">Enable location for local news.</div>'
-)
 
-col_global, col_national, col_local = st.columns(3)
-_news_tile(col_global, "🌍", "Global", _headline_rows(_news.get("global")), "global")
-_news_tile(col_national, "🇮🇳", "National", _headline_rows(_news.get("india")), "national")
-_news_tile(col_local, "📍", "Local", _local_rows, "local")
+if _features.get("news"):
+    _news = fetch_categorized_news(st.session_state.v_headlines, _news_city)
+    _local_rows = _headline_rows(_news.get("local")) if _news_city else (
+        '<div style="color:#6b5c40;font-size:11px;padding:4px 0;">Enable location for local news.</div>'
+    )
 
-st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+    col_global, col_national, col_local = st.columns(3)
+    _news_tile(col_global, "🌍", "Global", _headline_rows(_news.get("global")), "global")
+    _news_tile(col_national, "🇮🇳", "National", _headline_rows(_news.get("india")), "national")
+    _news_tile(col_local, "📍", "Local", _local_rows, "local")
+
+    st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
 
 # ── NEW RELEASES: THEATRES + OTT (Netflix / Prime / Hotstar / Zee5) ─────────
-hdr_ent, btn_ent = st.columns([10, 1])
-with hdr_ent:
-    st.markdown('<p style="font-size:9.5px;font-weight:700;letter-spacing:1px;color:#a99872;text-transform:uppercase;margin:0 0 5px 0;">🎬 New Releases · Theatres &amp; OTT</p>', unsafe_allow_html=True)
-with btn_ent:
-    if st.button("↺", key="ref_entertainment"):
-        st.session_state.v_entertainment += 1
-        st.rerun()
+if _features.get("entertainment"):
+    hdr_ent, btn_ent = st.columns([10, 1])
+    with hdr_ent:
+        st.markdown('<p style="font-size:9.5px;font-weight:700;letter-spacing:1px;color:#a99872;text-transform:uppercase;margin:0 0 5px 0;">🎬 New Releases · Theatres &amp; OTT</p>', unsafe_allow_html=True)
+    with btn_ent:
+        if st.button("↺", key="ref_entertainment"):
+            st.session_state.v_entertainment += 1
+            st.rerun()
 
-_ent = fetch_entertainment(st.session_state.v_entertainment)
-_ent_empty = '<div style="color:#6b5c40;font-size:11px;padding:4px 0;">Nothing new to report.</div>'
+    _ent = fetch_entertainment(st.session_state.v_entertainment)
+    _ent_empty = '<div style="color:#6b5c40;font-size:11px;padding:4px 0;">Nothing new to report.</div>'
 
-components.html(f"""
+    components.html(f"""
 <link href="{_TILE_FONT}" rel="stylesheet">
 <div style="background:#211b13;border:1px solid #332b1f;border-radius:8px;padding:12px 14px 14px 14px;font-family:'Inter',sans-serif;display:grid;grid-template-columns:1fr 1fr;gap:14px;overflow:hidden;">
     <div>
@@ -547,6 +661,10 @@ components.html(f"""
     </div>
 </div>
 """, height=_TILE_H + 18)
+
+if _features.get("news") or _features.get("entertainment"):
+    st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+
 
 # ── FLOATING CFA ASSISTANT PANEL ─────────────────────────────────────────────
 # Rebuilt on a manually-toggled st.container (targeted via its `key`, which
@@ -577,7 +695,10 @@ def _clean_cfa_text(raw: str) -> str:
 
 
 if "cfa_panel_open" not in st.session_state:
-    st.session_state.cfa_panel_open = False
+    # Now an inline, always-in-flow section (it lives where the Trade
+    # Terminal used to sit) rather than a floating overlay, so it starts
+    # open by default — no click needed to discover it.
+    st.session_state.cfa_panel_open = True
 if "voice_history" not in st.session_state:
     st.session_state.voice_history = []
 if "last_audio_id" not in st.session_state:
@@ -590,6 +711,12 @@ if "location_attempts" not in st.session_state:
     st.session_state.location_attempts = 0
 if "pending_cfa_query" not in st.session_state:
     st.session_state.pending_cfa_query = None
+if "chat_loaded_date" not in st.session_state:
+    # IST calendar-date key of whatever's currently loaded into
+    # voice_history — compared against "today" every rerun so a midnight
+    # rollover clears the panel and re-fetches a fresh day (see the
+    # daily-chat load block below). None means nothing's been loaded yet.
+    st.session_state.chat_loaded_date = None
 
 def _reverse_geocode(lat: float, lon: float) -> str:
     """Free, key-less reverse geocode via OpenStreetMap Nominatim — turns raw
@@ -642,65 +769,78 @@ if isinstance(_geo_result, dict):
         st.session_state.location_attempts = 5
 
 
-def get_proactive_greeting(dt_ist: datetime.datetime) -> str:
-    """Opening line, chosen by day-type rather than a genuine mood read —
-    there's no reliable signal to infer actual mood from at panel-open, so
-    this uses weekday vs weekend as a proxy and always leaves the door open
-    for the person to redirect. NOTE: this only checks Mon-Fri, not the
-    actual NSE/BSE trading-holiday calendar (Diwali, Independence Day,
-    etc.) — wire that up next once a holiday list/API is chosen."""
-    if dt_ist.weekday() >= 5:  # Saturday=5, Sunday=6
-        return (
-            "Happy weekend! Markets are closed, so no trade calls today — "
-            "want help planning something instead? I can suggest movies, "
-            "restaurants nearby, or think through a weekend getaway."
-        )
-    return (
-        "Good to see you — it's a trading day. Want to go over today's "
-        "market movers, a stock you're tracking, or any open IPOs? "
-        "Not in a trading mood today — happy to help with something else instead."
-    )
+# ── Fallback greeting, used ONLY if the backend's phase-aware /daily-chat
+# endpoint can't be reached (e.g. connection error). The real greeting —
+# a data-grounded pre-market read, a live intraday update, an end-of-day
+# wrap-up, or a weekend redirect — is generated server-side by
+# backend/app/market_briefing.py and fetched via _load_daily_chat below,
+# so it reflects actual market factors instead of a canned line.
+_FALLBACK_GREETING = (
+    "Here for the session, or here for something else today? Either way, "
+    "I've got you — market movers, a specific stock, or just a good movie "
+    "recommendation, your call."
+)
+
+
+def _load_daily_chat() -> None:
+    """Fetches today's Daily Productivity Assistant chat from the backend
+    (backend/app/routers/market.py's GET /api/market/daily-chat) and loads
+    it into voice_history. That endpoint is phase-aware (pre-market /
+    market-hours / post-market / weekend) and only generates a NEW
+    proactive message the first time a given phase is seen for the day —
+    reconnecting again later returns exactly what's already there, so the
+    panel never repeats itself. Logged-in users get the full day's chat
+    persisted server-side in Firestore (survives a reconnect); everyone
+    else still gets the phase-aware greeting, just without cross-session
+    persistence. A fresh IST calendar day always starts empty."""
+    try:
+        params = {}
+        _token = get_id_token()
+        if _token:
+            params["id_token"] = _token
+        resp = requests.get(f"{BACKEND_URL}/api/market/daily-chat", params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        st.session_state.voice_history = [
+            {"role": m["role"], "text": m["text"], "route": m.get("route")}
+            for m in data.get("messages", [])
+        ]
+        st.session_state.chat_loaded_date = data.get("date") or _today_ist_key
+    except Exception:
+        # Backend unreachable — still show something rather than an empty
+        # panel, but don't mark a date as "loaded" so the next successful
+        # rerun retries the real fetch instead of getting stuck on this.
+        st.session_state.voice_history = [{"role": "cfa", "text": _FALLBACK_GREETING}]
 
 st.markdown("""
 <style>
-/* Floating toggle / close pill — always visible, top-right */
-div[class*="st-key-cfa_toggle_wrap"] {
-    position: fixed !important;
-    top: 24px !important;
-    right: 24px !important;
-    z-index: 1000000 !important;
-    width: auto !important;
-}
+/* Inline toggle — sits at the top of the panel itself now (it used to be
+   a fixed top-right pill for a floating overlay; the panel is a normal,
+   full-width section in the page flow now, right where the Trade
+   Terminal used to be, so the toggle just collapses/expands it in place). */
 div[class*="st-key-cfa_toggle_wrap"] button {
     border-radius: 20px !important;
     padding: 6px 16px !important;
-    font-size: 14px !important;
+    font-size: 13px !important;
     font-weight: 600 !important;
     background: #211b13 !important;
     border: 1px solid #463b28 !important;
     color: #e8ddc7 !important;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.35) !important;
     transition: all 0.2s ease !important;
 }
 div[class*="st-key-cfa_toggle_wrap"] button:hover {
     border-color: #8fae64 !important;
     color: #8fae64 !important;
-    transform: translateY(-1px) !important;
 }
 
-/* The panel itself — a full-height slide-in reading pane, not a dropdown */
+/* The panel itself — now a broad, normal-flow section (same width as the
+   rest of the dashboard) instead of a fixed slide-in overlay. */
 div[class*="st-key-cfa_panel"] {
-    position: fixed !important;
-    top: 0 !important;
-    right: 0 !important;
-    height: 100vh !important;
-    width: min(560px, 94vw) !important;
     background: #1c1710 !important;
-    border-left: 1px solid #463b28 !important;
-    box-shadow: -16px 0 40px rgba(0,0,0,0.55) !important;
-    z-index: 999998 !important;
-    padding: 76px 28px 20px 28px !important;
-    overflow-y: auto !important;
+    border: 1px solid #463b28 !important;
+    border-radius: 10px !important;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35) !important;
+    padding: 22px 28px 20px 28px !important;
 }
 .cfa-disclaimer {
     font-size: 11px;
@@ -731,6 +871,30 @@ div[class*="st-key-cfa_panel"] {
     font-size: 14.5px;
     line-height: 1.65;
 }
+/* The reply text inside .cfa-bubble is now rendered via a real st.markdown()
+   call (see the chat loop) instead of flat escaped text, so bullets, bold,
+   and tables all render — these rules just strip Streamlit's default block
+   spacing/dark-mode-agnostic table styling so it still reads as one tight
+   chat bubble instead of a normal page section. */
+.cfa-bubble div[data-testid="stMarkdownContainer"] { margin: 0; }
+.cfa-bubble div[data-testid="stMarkdownContainer"] > *:first-child { margin-top: 0 !important; }
+.cfa-bubble div[data-testid="stMarkdownContainer"] > *:last-child { margin-bottom: 0 !important; }
+.cfa-bubble p { margin: 0 0 8px 0; }
+.cfa-bubble ul, .cfa-bubble ol { margin: 4px 0 8px 0; padding-left: 20px; }
+.cfa-bubble li { margin-bottom: 3px; }
+.cfa-bubble strong { color: #f6efdc; }
+.cfa-bubble table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin: 6px 0 10px 0;
+}
+.cfa-bubble th, .cfa-bubble td {
+    border: 1px solid rgba(143,174,100,0.25);
+    padding: 5px 9px;
+    text-align: left;
+}
+.cfa-bubble th { background: rgba(143,174,100,0.15); color: #f6efdc; font-weight: 700; }
 .cfa-empty-state {
     text-align: center;
     color: #6b5c40;
@@ -740,21 +904,33 @@ div[class*="st-key-cfa_panel"] {
 </style>
 """, unsafe_allow_html=True)
 
-with st.container(key="cfa_toggle_wrap"):
-    toggle_label = "✕  Close" if st.session_state.cfa_panel_open else "🤖  Daily Productivity Assistant"
-    if st.button(toggle_label, key="cfa_toggle_btn"):
-        st.session_state.cfa_panel_open = not st.session_state.cfa_panel_open
+_daily_agent_enabled = _features.get("daily_productivity", True)
+
+if _daily_agent_enabled:
+    toggle_l, toggle_r = st.columns([9, 2])
+    with toggle_l:
+        st.markdown('<p style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:#a99872;text-transform:uppercase;margin:10px 0 5px 0;">🤖 Daily Productivity Assistant</p>', unsafe_allow_html=True)
+    with toggle_r:
+        with st.container(key="cfa_toggle_wrap"):
+            toggle_label = "▲ Collapse" if st.session_state.cfa_panel_open else "▼ Expand"
+            if st.button(toggle_label, key="cfa_toggle_btn"):
+                st.session_state.cfa_panel_open = not st.session_state.cfa_panel_open
 
 # Greeting + GPS fetch run AFTER the toggle above has settled this run's
 # final open/closed state — doing this before the toggle block (as an
 # earlier version did) meant the very click that opened the panel was
 # evaluated against the *stale* pre-click state, so the greeting only
 # ever appeared one interaction later (e.g. after typing "hi").
-if st.session_state.cfa_panel_open and not st.session_state.greeted and not st.session_state.voice_history:
-    st.session_state.voice_history.append({"role": "cfa", "text": get_proactive_greeting(_now_ist)})
+# Loads (once) whenever the panel is open and either nothing's been loaded
+# yet this session, or the IST calendar day has rolled over since the last
+# load — which is what makes "today's messages stick around all day, but a
+# new day starts fresh" work: chat_loaded_date is the persisted document's
+# own date key, and a mismatch means we're now into a new one.
+if _daily_agent_enabled and st.session_state.cfa_panel_open and st.session_state.chat_loaded_date != _today_ist_key:
+    _load_daily_chat()
     st.session_state.greeted = True
 
-if st.session_state.cfa_panel_open:
+if _daily_agent_enabled and st.session_state.cfa_panel_open:
     with st.container(key="cfa_panel"):
         st.markdown(
             '<div style="font-size:13px;font-weight:900;letter-spacing:1px;color:#f6efdc;'
@@ -780,6 +956,83 @@ if st.session_state.cfa_panel_open:
         # now live as their own tiles on the main dashboard (Row 2), so
         # repeating them inside this chat panel was redundant.
 
+        # ── Gmail connect — enables the spending_agent's "how did my
+        # spending look" answers (see backend/app/gmail_spending.py). A
+        # separate, explicit Google consent grant from Firebase login itself
+        # — logging into this app never implies Gmail access was granted.
+        with st.expander("🔗 Connect Gmail for spending insights", expanded=False):
+            _qp = st.query_params
+            if _qp.get("gmail_connect") == "success":
+                st.success("Gmail connected — ask about your spending any time.")
+                st.query_params.clear()
+            elif _qp.get("gmail_connect") == "error":
+                st.error(f"Gmail connection failed ({_qp.get('reason', 'unknown error')}). Try again.")
+                st.query_params.clear()
+
+            _token = get_id_token()
+            if not _token:
+                st.caption("Log in first to connect Gmail.")
+            else:
+                _headers = {"Authorization": f"Bearer {_token}"}
+                try:
+                    _status = requests.get(f"{BACKEND_URL}/api/gmail/status", headers=_headers, timeout=10).json()
+                except Exception:
+                    _status = {"connected": False}
+
+                if _status.get("connected"):
+                    st.markdown("✅ **Gmail connected** — UPI/bank debit alerts are being scanned for spending insights.")
+                    gcol1, gcol2, gcol3 = st.columns(3)
+                    with gcol1:
+                        if st.button("Refresh spending data", key="gmail_sync_btn"):
+                            try:
+                                r = requests.post(f"{BACKEND_URL}/api/gmail/sync", headers=_headers, timeout=60)
+                                r.raise_for_status()
+                                st.success(f"Synced — {r.json().get('new_transactions_stored', 0)} new transactions found.")
+                            except Exception as e:
+                                st.error(f"Sync failed: {e}")
+                    with gcol2:
+                        # Ordinary refresh above only picks up NEW mail —
+                        # transactions already stored keep whatever merchant
+                        # the parser extracted at the time, even after a
+                        # parsing-logic fix. This re-parses every stored
+                        # transaction with today's logic, correcting things
+                        # like a helpline number or boilerplate phrase
+                        # ("help you") that got mistaken for a merchant
+                        # before. Slower than a normal refresh since it
+                        # re-fetches every matched email, not just new ones.
+                        if st.button("Fix past entries", key="gmail_reparse_btn", help="Re-parses all previously-synced transactions with the latest merchant-extraction logic — use this once if old summaries show odd merchant names like a phone number or 'help you'."):
+                            try:
+                                r = requests.post(
+                                    f"{BACKEND_URL}/api/gmail/sync",
+                                    params={"force_reparse": "true"},
+                                    headers=_headers, timeout=120,
+                                )
+                                r.raise_for_status()
+                                st.success(f"Re-parsed — {r.json().get('new_transactions_stored', 0)} transactions updated.")
+                            except Exception as e:
+                                st.error(f"Re-parse failed: {e}")
+                    with gcol3:
+                        if st.button("Disconnect", key="gmail_disconnect_btn"):
+                            try:
+                                requests.post(f"{BACKEND_URL}/api/gmail/disconnect", headers=_headers, timeout=10)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Disconnect failed: {e}")
+                else:
+                    st.caption(
+                        "Connect your Gmail (read-only) so I can spot UPI/bank debit alerts and "
+                        "answer things like \"how did my spending go this month?\". Nothing else in "
+                        "your inbox is read."
+                    )
+                    if st.button("Connect Gmail", key="gmail_connect_btn"):
+                        try:
+                            r = requests.get(f"{BACKEND_URL}/api/gmail/auth-url", headers=_headers, timeout=10)
+                            r.raise_for_status()
+                            auth_url = r.json().get("auth_url")
+                            st.markdown(f'<a href="{auth_url}" target="_self">Click here to continue to Google →</a>', unsafe_allow_html=True)
+                        except Exception as e:
+                            st.error(f"Couldn't start Gmail connection: {e}")
+
         # Persona + voice-reply controls
         ctrl1, ctrl2 = st.columns([2, 1.6])
         with ctrl1:
@@ -803,7 +1056,7 @@ if st.session_state.cfa_panel_open:
                 {"role": "assistant" if m["role"] == "cfa" else "user", "text": m["text"]}
                 for m in st.session_state.voice_history[-6:]
             ]
-            with st.spinner("Consulting the CFA desk..."):
+            with st.spinner("Routing your question to the right specialist..."):
                 try:
                     resp = requests.post(f"{BACKEND_URL}/api/market/voice", json={
                         "prompt": prompt_text,
@@ -813,6 +1066,7 @@ if st.session_state.cfa_panel_open:
                         "mode": mode_val,
                         "location": st.session_state.user_location,
                         "history": recent_history,
+                        "id_token": get_id_token(),
                     }, timeout=60)
 
                     if resp.status_code == 200:
@@ -869,14 +1123,36 @@ if st.session_state.cfa_panel_open:
                     ''', unsafe_allow_html=True)
                 elif msg["role"] == "cfa":
                     clean_text = _clean_cfa_text(msg["text"])
+                    # Which desk(s) actually answered this turn (see agents.py
+                    # Orchestrator.process_query_async -> route_meta["agent_labels"]).
+                    # Replaces the old hardcoded "Consulting the CFA desk..." — a
+                    # movie question now visibly shows "Cinema Desk" / "Leisure
+                    # Concierge" instead of implying everything goes through CFA.
+                    _labels = (msg.get("route") or {}).get("agent_labels") or []
+                    _label_html = ""
+                    if _labels:
+                        _label_html = (
+                            '<div style="font-size:10px;font-weight:700;letter-spacing:0.5px;'
+                            'text-transform:uppercase;color:#8fae64;margin:0 0 3px 44px;">'
+                            f'{html.escape(" + ".join(_labels))}</div>'
+                        )
+                    if _label_html:
+                        st.markdown(_label_html, unsafe_allow_html=True)
+                    # Opens the avatar/bubble wrapper only — the reply text itself is
+                    # rendered by a separate st.markdown() call right after (real
+                    # commonmark: bullets, bold, and tables all render properly
+                    # instead of being flattened into one escaped paragraph), and
+                    # the wrapper is closed a couple of calls further down. Same
+                    # split-open/close-across-calls pattern already used below for
+                    # the snapshot/peers/movie cards.
                     st.markdown(f'''
                     <div class="cfa-bubble-row" style="justify-content:flex-start;">
                         <div class="cfa-avatar" style="background:#8fae64;color:#15120e;">AI</div>
                         <div class="cfa-bubble" style="background:rgba(143,174,100,0.10);
                             border:1px solid rgba(143,174,100,0.35);border-radius:14px 14px 14px 2px;
                             color:#e8ddc7;margin-bottom:{'8px' if msg.get('audio') else '0'};">
-                            {html.escape(clean_text)}
                     ''', unsafe_allow_html=True)
+                    st.markdown(clean_text)
                     if msg.get("audio"):
                         st.markdown(f'<audio controls autoplay style="width:100%;height:36px;border-radius:4px;"><source src="data:audio/mp3;base64,{msg["audio"]}" type="audio/mp3"></audio>', unsafe_allow_html=True)
                     st.markdown('</div></div>', unsafe_allow_html=True)
@@ -898,6 +1174,110 @@ if st.session_state.cfa_panel_open:
     <iframe src="{_embed_url}" width="100%" height="280" style="border:0;display:block;" loading="lazy"></iframe>
 </div>
 """, height=286)
+
+                    # Stock snapshot card — rendered whenever the equity agent
+                    # successfully called get_stock_snapshot this turn (see
+                    # agents.py's route_meta capture). Real pulled numbers,
+                    # not a re-narration of whatever the model said in text.
+                    _snap = _route.get("snapshot") if _route else None
+                    if _snap:
+                        def _fmt(v, suffix="", prefix="", decimals=2):
+                            if v is None:
+                                return "—"
+                            try:
+                                return f"{prefix}{float(v):,.{decimals}f}{suffix}"
+                            except (TypeError, ValueError):
+                                return str(v)
+
+                        _chg = _snap.get("dayChangePct")
+                        _chg_color = "#8fae64" if (_chg or 0) >= 0 else "#c4685a"
+                        _chg_str = f"{_chg:+.2f}%" if _chg is not None else "—"
+                        _ychg = _snap.get("yearChangePct")
+                        _ychg_badge = ""
+                        if _ychg is not None:
+                            _yc_color = "#8fae64" if _ychg >= 0 else "#c4685a"
+                            _yc_arrow = "↑" if _ychg >= 0 else "↓"
+                            _ychg_badge = (
+                                f'<span style="font-size:11px;font-weight:700;color:{_yc_color};'
+                                f'background:rgba(143,174,100,0.12);border-radius:20px;padding:2px 9px;margin-left:8px;">'
+                                f'{_yc_arrow} {abs(_ychg):.2f}% past year</span>'
+                            )
+                        _chart_svg = _svg_price_chart(_snap.get("priceHistory") or [])
+                        with st.container():
+                            st.markdown(f'''
+<div style="margin:6px 0 4px 44px;padding:14px 16px;border:1px solid #3a3226;border-radius:10px;background:rgba(143,174,100,0.05);">
+    <div style="font-size:13px;font-weight:800;color:#f6efdc;">{html.escape(str(_snap.get("symbol") or ""))}
+        <span style="font-weight:400;color:#a99872;">{html.escape(str(_snap.get("shortName") or ""))}</span></div>
+    <div style="font-size:22px;font-weight:800;color:#f6efdc;margin:4px 0;">
+        ₹{_fmt(_snap.get("currentPrice"))}
+        <span style="font-size:13px;font-weight:700;color:{_chg_color};margin-left:8px;">{_chg_str} today</span>
+        {_ychg_badge}
+    </div>
+    {f'<div style="margin:6px -4px 2px -4px;">{_chart_svg}</div>' if _chart_svg else ''}
+    <div style="display:flex;flex-wrap:wrap;gap:14px;font-size:11px;color:#a99872;margin-top:8px;">
+        <div>Prev close<br><span style="color:#e8ddc7;">₹{_fmt(_snap.get("previousClose"))}</span></div>
+        <div>Day range<br><span style="color:#e8ddc7;">₹{_fmt(_snap.get("dayLow"))} – ₹{_fmt(_snap.get("dayHigh"))}</span></div>
+        <div>52-wk range<br><span style="color:#e8ddc7;">₹{_fmt(_snap.get("week52Low"))} – ₹{_fmt(_snap.get("week52High"))}</span></div>
+        <div>Mkt cap<br><span style="color:#e8ddc7;">₹{_fmt((_snap.get("marketCap") or 0)/1e7, decimals=0)} Cr</span></div>
+        <div>P/E<br><span style="color:#e8ddc7;">{_fmt(_snap.get("trailingPE"))}</span></div>
+        <div>Div yield<br><span style="color:#e8ddc7;">{_fmt(_snap.get("dividendYield"))}%</span></div>
+    </div>
+</div>
+''', unsafe_allow_html=True)
+
+                    # Peer comparison table — get_peer_comparison this turn.
+                    _peers = _route.get("peers") if _route else None
+                    if _peers and _peers.get("peers"):
+                        with st.container():
+                            st.markdown(
+                                f'<div style="margin:2px 0 2px 44px;font-size:10.5px;font-weight:700;'
+                                f'letter-spacing:0.5px;color:#a99872;text-transform:uppercase;">'
+                                f'Peers in {html.escape(str(_peers.get("sector") or ""))}</div>',
+                                unsafe_allow_html=True,
+                            )
+                            _rows = [_peers["target"]] + _peers["peers"]
+                            st.dataframe(
+                                [
+                                    {
+                                        "Symbol": r.get("symbol"),
+                                        "Price (₹)": r.get("current_price"),
+                                        "Mkt Cap (₹Cr)": round((r.get("market_cap") or 0) / 1e7) if r.get("market_cap") else None,
+                                        "P/E": r.get("pe_ratio"),
+                                        "ROE %": r.get("roe"),
+                                    }
+                                    for r in _rows
+                                ],
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                    # Movie info card — rendered when cinema_agent called
+                    # get_movie_info this turn (real TMDB data, not the
+                    # model's memory — see agents.py's route_meta capture).
+                    _movie = _route.get("movie_info") if _route else None
+                    if _movie:
+                        with st.container():
+                            _poster_html = (
+                                f'<img src="{_movie.get("poster_url")}" style="width:64px;border-radius:6px;'
+                                f'margin-right:12px;" />' if _movie.get("poster_url") else ""
+                            )
+                            _cast_str = ", ".join(_movie.get("cast") or []) or "—"
+                            st.markdown(f'''
+<div style="margin:6px 0 4px 44px;padding:12px 14px;border:1px solid #3a3226;border-radius:10px;
+    background:rgba(143,174,100,0.05);display:flex;align-items:flex-start;">
+    {_poster_html}
+    <div>
+        <div style="font-size:14px;font-weight:800;color:#f6efdc;">{html.escape(str(_movie.get("title") or ""))}
+            <span style="font-weight:400;color:#a99872;font-size:11px;">{html.escape(str(_movie.get("release_date") or ""))}</span></div>
+        <div style="font-size:11px;color:#a99872;margin-top:2px;">
+            ⭐ {_movie.get("vote_average", "—")}/10 · {html.escape(", ".join(_movie.get("genres") or []))}
+            {f' · {_movie.get("runtime_minutes")} min' if _movie.get("runtime_minutes") else ''}
+        </div>
+        <div style="font-size:11px;color:#a99872;margin-top:4px;">Director: {html.escape(str(_movie.get("director") or "—"))}</div>
+        <div style="font-size:11px;color:#a99872;">Cast: {html.escape(_cast_str)}</div>
+    </div>
+</div>
+''', unsafe_allow_html=True)
 
         # ── Text input ──
         user_query = st.chat_input("Ask your Daily Productivity Assistant...", key="bot_chat_input")

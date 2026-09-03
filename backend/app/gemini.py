@@ -45,6 +45,39 @@ DISCLAIMER = (
     "constitute financial or trading advice. Execute trades at your own risk."
 )
 
+
+def _markdown_to_speech(text: str) -> str:
+    """Best-effort strip of markdown syntax down to natural spoken text.
+    Not a full parser — just removes/replaces the constructs domain agents
+    are now encouraged to use (tables, bullets, bold, headers) so TTS
+    doesn't read out literal '|', '-', or '#' characters."""
+    import re as _re
+
+    lines_out = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            lines_out.append("")
+            continue
+        # Markdown table row: "| Metric | Value |" -> "Metric: Value."
+        if stripped.startswith("|") and stripped.endswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            # Skip separator rows like "---|---"
+            if all(_re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+                continue
+            lines_out.append(". ".join(c for c in cells if c) + ".")
+            continue
+        # Headers: "### Foo" -> "Foo."
+        stripped = _re.sub(r"^#{1,6}\s*", "", stripped)
+        # Bullets/numbered lists: "- Foo" / "1. Foo" -> "Foo."
+        stripped = _re.sub(r"^[-*•]\s+", "", stripped)
+        stripped = _re.sub(r"^\d+\.\s+", "", stripped)
+        # Bold/italic markers
+        stripped = _re.sub(r"\*\*(.+?)\*\*", r"\1", stripped)
+        stripped = _re.sub(r"\*(.+?)\*", r"\1", stripped)
+        lines_out.append(stripped)
+    return "\n".join(lines_out)
+
 class CFAMultiAgentBot:
     def __init__(self, voice_persona: str = DEFAULT_PERSONA):
         """
@@ -108,11 +141,19 @@ class CFAMultiAgentBot:
         """
         Converts text to speech using Google Cloud Text-to-Speech and
         returns MP3-encoded audio bytes.
+
+        The chat UI now renders replies as real markdown (bullets, bold,
+        tables) so domain agents were told to prefer that over dense prose —
+        great to read, but a table read aloud literally ("pipe P slash E
+        pipe eighty three point nine pipe") is not. Strip that formatting
+        down to plain spoken text here, on the speech path only; the
+        original markdown text is untouched everywhere else (chat bubble,
+        Firestore history, etc.).
         """
         client = self._get_tts_client()
         voice_cfg = PERSONA_VOICE_MAP[self.voice_persona]
 
-        synthesis_input = texttospeech.SynthesisInput(text=text)
+        synthesis_input = texttospeech.SynthesisInput(text=_markdown_to_speech(text))
         voice = texttospeech.VoiceSelectionParams(
             language_code=voice_cfg["language_code"],
             name=voice_cfg["name"],
@@ -127,7 +168,7 @@ class CFAMultiAgentBot:
         )
         return response.audio_content
 
-    async def process_query(self, user_prompt: str = "", audio_bytes: bytes = None, mode: str = "TEXT", location: str = None, history: list = None):
+    async def process_query(self, user_prompt: str = "", audio_bytes: bytes = None, mode: str = "TEXT", location: str = None, history: list = None, uid: str = None):
         """
         Handles a single turn of the conversation:
           1. If audio was recorded, transcribe it (Google Cloud STT) to get the question.
@@ -174,7 +215,7 @@ class CFAMultiAgentBot:
 
         # 1. Gather deep, multi-domain expert analysis — awaited directly,
         # not via the sync asyncio.run() wrapper.
-        raw_answer, route_meta = await self.orchestrator.process_query_async(user_prompt, location=location, history=history)
+        raw_answer, route_meta = await self.orchestrator.process_query_async(user_prompt, location=location, history=history, uid=uid)
 
         # 2. Enforce regulatory disclaimer
         final_text = f"{DISCLAIMER}\n\n{raw_answer}"

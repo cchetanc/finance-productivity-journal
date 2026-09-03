@@ -9,7 +9,7 @@ from typing import List
 from google import genai
 from google.genai import types as genai_types
 from .secrets import PROJECT_ID
-from .tools_impls import TOOL_SCHEMAS, TOOL_IMPLS
+from .tools_impls import TOOL_SCHEMAS, TOOL_IMPLS, set_current_uid
 from .market_data import get_live_indices, compute_market_mood
 
 # Safety cap on tool-call round trips per agent turn, in case a model keeps
@@ -165,13 +165,16 @@ equity_agent = SimpleAgent(
 
         WHEN A STOCK OR COMPANY IS NAMED: ALWAYS call 'get_market_data' first to ground your analysis
         in real current fundamentals (price, market cap, trailing P/E, sector) — never guess numbers
-        you could fetch. Then give a DEEP, structured analysis:
-        1. Business overview — what the company does and its competitive position/moat.
-        2. Fundamentals & valuation — the fetched metrics, how the valuation (e.g. P/E) compares to sector
-           norms, and what that implies (cheap, fair, expensive).
-        3. Growth drivers & catalysts — revenue drivers, upcoming catalysts, sector tailwinds.
-        4. Risk factors — company-specific, sector, and macro risks that could invalidate the thesis.
-        5. Conclusion — a clear stance (bullish/neutral/bearish) with the key condition that would change it.
+        you could fetch. Then give a DEEP, structured analysis, formatted as short bullets under
+        each heading (see the FORMATTING rules above) rather than paragraphs:
+        1. Business overview — what the company does and its competitive position/moat, in 2-3 bullets.
+        2. Fundamentals & valuation — put the fetched metrics (price, market cap, P/E, sector, and
+           anything else relevant) into a markdown table (Metric | Value), then one or two bullets on
+           how the valuation compares to sector norms and what that implies (cheap, fair, expensive).
+        3. Growth drivers & catalysts — revenue drivers, upcoming catalysts, sector tailwinds, as bullets.
+        4. Risk factors — company-specific, sector, and macro risks that could invalidate the thesis, as bullets.
+        5. Conclusion — a clear stance (bullish/neutral/bearish) with the key condition that would change it;
+           this is the one place a short paragraph (1-2 sentences) is fine instead of bullets.
         Do not refuse to analyze a stock just because it is newly listed or volatile — instead flag that
         volatility explicitly as a risk factor within the structured analysis above.
         If get_market_data returns an error (e.g. the ticker can't be resolved yet), don't stop —
@@ -192,6 +195,17 @@ equity_agent = SimpleAgent(
         3. Close by asking if they want you to dig into any specific name from that list, or if
            they have their own watchlist/stock names they'd rather you analyze instead.
 
+        WHEN THE USER WANTS INSIGHT/ANALYSIS ON A SPECIFIC NAMED STOCK (e.g. "tell me about X",
+        "give me insight on Y", "how's Z doing", "how does X listed on BSE/NSE look", "show me X's
+        chart/price"): call 'get_stock_snapshot' FIRST — this is what powers the price chart and
+        key-metrics card the user sees inline, so treat it as required, not optional, whenever a
+        specific company/ticker is the subject. Then
+        'get_peer_comparison' too if the stock has an identifiable sector. Build your narrative
+        analysis around those real, live numbers — never state a P/E, price, or market cap from
+        memory, since an estimated figure can silently disagree with the real one and undermine
+        trust in the whole answer. If get_stock_snapshot errors (e.g. a stock too newly listed to
+        resolve), say so plainly and answer qualitatively instead of inventing numbers.
+
         WHEN THE USER WANTS TO FILTER/SCREEN STOCKS BY CRITERIA (e.g. "PE under 20 and ROE above
         15", "revenue growth QoQ over 20%", "best fundamentals in the auto sector") rather than
         asking about one named stock: call 'query_equity_screener' with the matching filter
@@ -202,7 +216,7 @@ equity_agent = SimpleAgent(
         plainly and suggest loosening the criteria rather than inventing tickers.
     """,
     output_key="equity_insight",
-    tools=["get_market_data", "get_market_movers", "query_equity_screener"],
+    tools=["get_market_data", "get_market_movers", "query_equity_screener", "get_stock_snapshot", "get_peer_comparison"],
 )
 
 mf_agent = SimpleAgent(
@@ -508,7 +522,11 @@ cinema_agent = SimpleAgent(
 
         For discussion/opinion/trivia requests (a director's style, a film's themes, "is X worth
         watching"): give a genuine, opinionated, well-informed take — real critical engagement, not a
-        neutral plot summary.
+        neutral plot summary. WHEN A SPECIFIC FILM IS NAMED and a factual detail matters (release date,
+        cast, director, runtime, rating), call 'get_movie_info' to ground it in real, current TMDB data
+        rather than reciting it from memory — your training data can have a stale or simply wrong cast
+        list, especially for anything recent. If get_movie_info returns an error (no match found), say
+        so plainly and proceed with your own knowledge, clearly flagged as unverified.
 
         CRITICAL — do not answer "what's new/current" from memory: your training data has a cutoff and
         release slates change weekly. If REAL-TIME WEB CONTEXT is provided and relevant, prefer it for
@@ -517,6 +535,7 @@ cinema_agent = SimpleAgent(
         naming specific "new" titles from memory as if they're still in theatres.
     """,
     output_key="cinema_insight",
+    tools=["get_movie_info"],
 )
 
 media_reporter_agent = SimpleAgent(
@@ -546,6 +565,43 @@ media_reporter_agent = SimpleAgent(
     output_key="media_reporter_insight",
 )
 
+spending_agent = SimpleAgent(
+    name="spending_agent",
+    model=MODEL_NAME,
+    description=(
+        "Personal spending insights from the user's own connected Gmail — UPI/bank debit alerts "
+        "aggregated by month. Use for 'how did my spending look', 'how much did I spend on X'."
+    ),
+    instruction="""
+        You are a personal spending-insights assistant. Call 'get_upi_spending_summary' to get real,
+        parsed monthly totals from the user's connected Gmail — never estimate or invent a spending
+        figure. If the tool returns an "error" about Gmail not being connected, say so plainly and
+        tell the user they can connect Gmail from the assistant panel to enable this, then stop —
+        do not proceed to make up numbers.
+
+        When you do have real data, structure your answer:
+        1. Headline number — total spent for the month asked about (or the most recent month if
+           none was specified), stated plainly up front.
+        2. Where it went — the top merchants/categories from the tool's top_merchants list, as a
+           short list with amounts. Report each merchant string EXACTLY as the tool returned it —
+           never rename, paraphrase, or dress up a label to sound more informative (e.g. if the
+           tool says "Unknown", say "Unknown", not an invented category like "Bank Alert Outflows"
+           or "Balance Notifications"). An unclassified amount is meaningful information the user
+           needs to see as unclassified, not smoothed over.
+        3. One genuinely useful observation — e.g. how this month compares to the previous one if
+           both are in the data, or a merchant that stands out — only if the data actually supports
+           it; don't manufacture a trend from a single month. If "Unknown" is a large share of the
+           total, say so plainly and suggest the user check the Gmail settings panel's "Fix past
+           entries" button, rather than papering over it with a confident-sounding narrative.
+        Keep it conversational and encouraging, not judgmental about spending habits — you're
+        reporting facts, not lecturing. Mention plainly that this only covers spending visible via
+        UPI/bank email alerts (cash and non-alerted payments won't appear), so treat totals as a
+        floor, not a complete picture.
+    """,
+    output_key="spending_insight",
+    tools=["get_upi_spending_summary"],
+)
+
 # Not a finance agent — deliberately separate from the CFA/CFP team above.
 # "Movies", "restaurants nearby", "weekend plan", "long drive" etc. must land
 # here, never get force-fit into an equity/commodity lens (that was the bug:
@@ -563,8 +619,16 @@ leisure_agent = SimpleAgent(
         things to do. You are NOT a financial analyst; never reframe a leisure question as an industry,
         stock, or market analysis (e.g. "movies" means films to watch, not movie-studio equities).
 
-        Give ONLY what was asked for this turn. No elaboration, no extra sections, no follow-up
-        commentary the user didn't request, no restating context they already gave you.
+        TONE: be warm and a little playful, like a well-traveled friend who's genuinely excited to help
+        plan the outing — vary your opening line turn to turn (don't reuse the same stock phrase every
+        time), use vivid, specific language when describing a place or film rather than generic
+        adjectives ("cozy rooftop with skyline views" beats "nice restaurant"), and let a little
+        personality/humor come through. This is about voice and word choice, not length — see the next
+        rule.
+
+        Give ONLY what was asked for this turn. No extra unrequested sections, no follow-up commentary
+        the user didn't request, no restating context they already gave you. Within whatever you DO
+        give, make it lively and specific rather than a flat, robotic list.
 
         If the message includes a location (directly or from recent conversation), use REAL-TIME WEB
         CONTEXT (if present) to name real, specific theatres/multiplexes actually near that location —
@@ -590,11 +654,16 @@ leisure_agent = SimpleAgent(
 
         2. "Showtimes / availability / tickets" for a movie (or movies):
            Reply with a compact markdown table:
-           | Movie | Theatre | Showtime |
-           listing the real showtimes you have from REAL-TIME WEB CONTEXT. Do NOT include a "seats
-           available" or ticket-count column — no public source exposes real seat/ticket numbers, so
-           never state or estimate one. Add one short line at the end noting live seat counts aren't
-           accessible from here and pointing to the theatre's own booking page/app — nothing more.
+           | Movie | Theatre | Showtime | Ticket Price |
+           listing the real showtimes you have from REAL-TIME WEB CONTEXT. Fill "Ticket Price" only
+           with a real price/range you actually found there (e.g. from the theatre's own listing) —
+           if REAL-TIME WEB CONTEXT doesn't give a price for a row, put "—", never a guessed number.
+           Do NOT include a "seats available" or ticket-count column — no public source exposes real
+           seat/ticket numbers, so never state or estimate one, even if asked directly for "how many
+           tickets are left." Add one short line at the end noting that live seat counts and exact
+           per-show pricing aren't accessible from here and pointing to the theatre's own booking
+           app (e.g. BookMyShow, District, the multiplex's own app) as the only place that shows the
+           real-time seat map and final price — nothing more.
 
         3. "Directions / route / how do I get to / road trip / drive to" X:
            Call 'get_safe_route' — this is a real safety-scored routing service (PathSense), not a
@@ -643,6 +712,19 @@ results (e.g. get_market_data) and any block below labeled "REAL-TIME WEB CONTEX
 recall — if they conflict with your memory, go with them and say so explicitly, don't silently
 default to what you remember. If neither live tool data nor real-time context is available, say
 plainly that you couldn't verify current status rather than stating a guess as fact.
+
+FORMATTING — the app renders your reply as real markdown (bullets, bold, and tables all render
+properly, not as flat text), so use that instead of writing dense prose paragraphs:
+- Default to short bullet points (one idea per line) over multi-sentence paragraphs. A paragraph
+  is only acceptable for a single connecting thought (e.g. a one-line conclusion/stance) — anything
+  with 3+ distinct facts or considerations belongs in a bulleted list instead.
+- Whenever you're presenting three or more numeric metrics side by side (fundamentals, peer
+  comparisons, valuation ranges, screener results, etc.), use a compact markdown table
+  (| Metric | Value |) instead of listing them as prose or bullets — it's far easier to scan.
+- Bold the key figure or verdict in a line (e.g. "**P/E: 83.9x** — rich vs. sector average") so it
+  can be read at a glance.
+- Keep section headers short (a bolded label or "###" is fine); don't write essay-style topic
+  sentences before a list that just restate the header.
 """
 
 
@@ -833,6 +915,11 @@ class Synthesizer:
                away for tone. Cinema and Media Reporter insights are not investment analysis; keep them
                clearly separated from the financial specialists' numbers rather than blended into one
                undifferentiated "expert view."
+            4. Data labels stay literal: if a specialist's insight includes a specific figure tied to a
+               named merchant/category/ticker (spending data, portfolio holdings, screener results), carry
+               that label through verbatim — never rename, paraphrase, or "clean up" a label like
+               "Unknown" into a more polished-sounding one. An unclassified or ambiguous data point is
+               meaningful information the user needs to see as such, not smoothed into false confidence.
         """
         response = await self.client.aio.models.generate_content(
             model=MODEL_NAME,
@@ -847,6 +934,31 @@ def get_router():
 
 def get_synthesizer():
     return Synthesizer()
+
+# Human-readable labels for whichever domain(s) the router picked — used only
+# for display (e.g. a "Answered by: Cinema Desk" chip in the frontend), never
+# fed back into any prompt. Falls back to Title Case of the raw code if a new
+# domain is added here without a label.
+AGENT_DISPLAY_NAMES = {
+    "EQUITY": "Equity Desk",
+    "MUTUAL_FUNDS": "Mutual Fund Desk",
+    "COMMODITY": "Commodity Desk",
+    "MACRO": "Macro Desk",
+    "FIXED_INCOME": "Fixed Income Desk",
+    "REAL_ESTATE": "Real Estate Investment Desk",
+    "FINANCIAL_PLANNING": "Financial Planning Desk",
+    "CHARTERED_FINANCE": "Chartered Finance Strategist",
+    "CHARTERED_ASSOCIATE": "Tax & Accounting Desk",
+    "QUANTS": "Quant Desk",
+    "FINANCE_ANALYST": "Financial Statement Analyst",
+    "INSURANCE": "Insurance Desk",
+    "LEGAL": "Legal Desk",
+    "REALTOR": "Realtor",
+    "LEISURE": "Leisure Concierge",
+    "CINEMA": "Cinema Desk",
+    "MEDIA_REPORTER": "News Desk",
+    "SPENDING": "Spending Insights",
+}
 
 class Orchestrator:
     def __init__(self):
@@ -868,15 +980,23 @@ class Orchestrator:
             "LEISURE": leisure_agent,
             "CINEMA": cinema_agent,
             "MEDIA_REPORTER": media_reporter_agent,
+            "SPENDING": spending_agent,
         }
         
-    async def process_query_async(self, query: str, location: str = None, history: list = None) -> tuple[str, dict | None]:
+    async def process_query_async(self, query: str, location: str = None, history: list = None, uid: str = None) -> tuple[str, dict | None]:
         # Recent turns, oldest first — used only to give the router and the
         # leisure agent enough context to recognize a short follow-up (e.g.
         # a bare city name replying to "which city are you in?") as part of
         # the ongoing question rather than a brand-new, context-free query.
         # Kept short (last 4 turns) since it's only there for intent
         # continuity, not for the agents to re-answer old questions.
+        # Scoped to this request's asyncio Task (contextvars are copied per
+        # Task, not shared globally), so a concurrent request from a
+        # different user can never see this uid — see tools_impls.py's
+        # get_upi_spending_summary for why this matters (it must never read
+        # the wrong person's Gmail-derived data).
+        set_current_uid(uid)
+
         history_block = ""
         if history:
             recent = history[-4:]
@@ -941,13 +1061,16 @@ class Orchestrator:
           opinions is CINEMA.
         - MEDIA_REPORTER: "what's happening today/this week", a news/headline briefing request — not a
           request for analysis or a recommendation, just reporting.
+        - SPENDING: "how did my spending look", "how much did I spend on X", "where's my money going" —
+          questions about the USER'S OWN past spending/expenses, not general budgeting advice (that's
+          FINANCIAL_PLANNING) and not investment analysis.
 
         Latest message: "{query}"
         Respond with a JSON object of the form {{"routes": [...]}}, where the array contains one or more of
         the following strings exactly:
         "EQUITY", "MUTUAL_FUNDS", "COMMODITY", "MACRO", "FIXED_INCOME", "REAL_ESTATE", "FINANCIAL_PLANNING",
         "CHARTERED_FINANCE", "CHARTERED_ASSOCIATE", "QUANTS", "FINANCE_ANALYST", "INSURANCE", "LEGAL",
-        "REALTOR", "LEISURE", "CINEMA", "MEDIA_REPORTER".
+        "REALTOR", "LEISURE", "CINEMA", "MEDIA_REPORTER", "SPENDING".
         Return ONLY the JSON object.
         """
         router = get_router()
@@ -1029,6 +1152,9 @@ class Orchestrator:
         # render an embedded map alongside the narrated route — independent of
         # how the model chooses to phrase its text reply, which would be a
         # fragile thing to regex out after the fact.
+        # route_meta from the backend: {"source","destination"} for a
+        # PathSense route, and/or {"snapshot", "peers"} whenever the equity
+        # agent called get_stock_snapshot / get_peer_comparison this turn.
         route_meta: dict = {}
 
         async def run_domain_agent(agent_name: str):
@@ -1116,6 +1242,18 @@ class Orchestrator:
 
                         if tool_name == "get_safe_route" and isinstance(result, dict) and "error" not in result:
                             route_meta.update({"source": result.get("source"), "destination": result.get("destination")})
+                        if tool_name == "get_stock_snapshot" and isinstance(result, dict) and "error" not in result:
+                            route_meta["snapshot"] = result
+                            # The chart renders straight from route_meta on the
+                            # frontend — the model only needs summary numbers
+                            # (yearChangePct etc.) to narrate, not ~250 raw daily
+                            # closes, so strip that before it re-enters the
+                            # conversation as a function response.
+                            result = {k: v for k, v in result.items() if k != "priceHistory"}
+                        if tool_name == "get_peer_comparison" and isinstance(result, dict) and "error" not in result:
+                            route_meta["peers"] = result
+                        if tool_name == "get_movie_info" and isinstance(result, dict) and "error" not in result:
+                            route_meta["movie_info"] = result
 
                         response_parts.append(
                             genai_types.Part.from_function_response(name=tool_name, response=result)
@@ -1136,7 +1274,15 @@ class Orchestrator:
 
         if not routes:
             routes = ["EQUITY"]
-            
+
+        # Surfaced to the frontend so the UI can show which desk actually
+        # answered (e.g. "Cinema Desk", "Leisure Concierge") instead of a
+        # hardcoded "Consulting the CFA desk..." regardless of topic — that
+        # mismatch was purely a frontend display bug, routing itself already
+        # picks the right agent(s) via the router prompt above.
+        route_meta["domains"] = routes
+        route_meta["agent_labels"] = [AGENT_DISPLAY_NAMES.get(r, r.title()) for r in routes]
+
         tasks = [run_domain_agent(r) for r in routes]
         results = await asyncio.gather(*tasks)
         combined_insights = "\n\n".join(results)

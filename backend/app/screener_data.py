@@ -274,7 +274,11 @@ def build_universe() -> list:
 def _safe(fn, default=None):
     try:
         v = fn()
-        return v if v not in (None, "", "None") else default
+        if v is None:
+            return default
+        if isinstance(v, str) and v in ("", "None"):
+            return default
+        return v
     except Exception:
         return default
 
@@ -419,7 +423,9 @@ def _enrich_from_statements(t: "yf.Ticker", out: dict) -> None:
                 return None
             for n in names:
                 if n in df.index:
-                    return df.loc[n]
+                    s = df.loc[n].dropna()
+                    if not s.empty:
+                        return s
             return None
 
         ebit      = row(financials, "EBIT", "Ebit")
@@ -575,7 +581,9 @@ def _enrich_from_statements(t: "yf.Ticker", out: dict) -> None:
                 return None
             for n in names:
                 if n in df.index:
-                    return df.loc[n]
+                    s = df.loc[n].dropna()
+                    if not s.empty:
+                        return s
             return None
 
         q_rev = q_row(q_fin, "Total Revenue")

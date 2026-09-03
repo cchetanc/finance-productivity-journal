@@ -37,3 +37,15 @@ def get_current_user_uid(auth_data: dict = Depends(verify_token)) -> str:
     Dependency to extract and inject the verified uid into the request lifecycle.
     """
     return auth_data["uid"]
+
+
+def get_current_user(auth_data: dict = Depends(verify_token)) -> dict:
+    """
+    Dependency returning {"uid": ..., "email": ...} — the email comes
+    straight from the verified Firebase ID token's claims, never from a
+    client-supplied request field, so it can't be spoofed by the caller.
+    Used anywhere (e.g. routers/auth.py's Gmail-domain check) that needs
+    the authenticated user's email, not just their uid.
+    """
+    decoded = auth_data["decoded_token"]
+    return {"uid": auth_data["uid"], "email": decoded.get("email")}

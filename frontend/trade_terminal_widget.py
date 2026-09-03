@@ -17,7 +17,7 @@ import html
 import requests
 import streamlit as st
 
-from auth_helper import auth_headers, get_id_token, login_widget, logout
+from auth_helper import auth_headers, get_id_token, login_widget
 
 ALGO_TYPES = ["ICEBERG", "TWAP", "VWAP", "MOMENTUM_SNIPER"]
 ALGO_DESCRIPTIONS = {
@@ -107,7 +107,7 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
                 st.cache_data.clear()
                 st.rerun()
 
-    if not login_widget():
+    if not login_widget(backend_url):
         return
 
     st.session_state.setdefault("tt_symbol", "RELIANCE-EQ")
@@ -115,13 +115,7 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
     st.session_state.setdefault("tt_exchange", "NSE")
     st.session_state.setdefault("tt_search_box", "RELIANCE")
 
-    top1, top2 = st.columns([4, 1])
-    with top1:
-        st.caption(f"Signed in as {st.session_state.get('fb_email', '')} · Angel One")
-    with top2:
-        if st.button("Sign out", key="tt_signout"):
-            logout()
-            st.rerun()
+    st.caption("Angel One")
 
     @st.cache_data(ttl=20)
     def fetch_broker_status():
@@ -177,7 +171,7 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
 
         query = (search_query or "").strip()
         is_fresh_search = query and query.upper() != st.session_state["tt_symbol"].split("-")[0]
-        if is_fresh_search and len(query) >= 2:
+        if is_fresh_search and len(query) >= 1:
             suggestions = search_symbols(query)
             if suggestions:
                 with st.container(border=True):
@@ -198,6 +192,45 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
                             st.rerun()
 
         st.caption(f"Selected: **{st.session_state['tt_symbol']}** ({st.session_state['tt_exchange']}) — {st.session_state['tt_symbol_label']}")
+
+        @st.cache_data(ttl=60)
+        def fetch_snapshot(ticker: str):
+            try:
+                base_ticker = ticker.split("-")[0]
+                if st.session_state['tt_exchange'] == "NSE":
+                    base_ticker += ".NS"
+                elif st.session_state['tt_exchange'] == "BSE":
+                    base_ticker += ".BO"
+                r = requests.get(f"{backend_url}/api/screener/snapshot", params={"ticker": base_ticker}, timeout=10)
+                if r.status_code == 200:
+                    return r.json()
+            except Exception:
+                pass
+            return None
+
+        snapshot = fetch_snapshot(st.session_state['tt_symbol'])
+        if snapshot and not snapshot.get("error"):
+            with st.container(border=True):
+                st.markdown('<p class="tt-section-label" style="margin-bottom:8px;">Live Fundamentals</p>', unsafe_allow_html=True)
+                mcap = snapshot.get("marketCap")
+                mcap_str = f"₹{round(mcap/1e7)} Cr" if mcap else "—"
+                pe = snapshot.get("trailingPE")
+                pe_str = f"{round(pe, 2)}" if pe else "—"
+                price = snapshot.get("currentPrice") or "—"
+                chg = snapshot.get("dayChangePct")
+                chg_str = f"{chg}%" if chg is not None else "—"
+                chg_color = "#8fae64" if chg and chg >= 0 else "#c16b57"
+                
+                html_block = f"""
+                <div style="display:flex;gap:20px;font-size:12px;color:#a99872;flex-wrap:wrap;">
+                    <div>Price: <span style="color:#e8ddc7;font-weight:600;">₹{price}</span> <span style="color:{chg_color};font-size:11px;">({chg_str})</span></div>
+                    <div>P/E: <span style="color:#e8ddc7;font-weight:600;">{pe_str}</span></div>
+                    <div>Mkt Cap: <span style="color:#e8ddc7;font-weight:600;">{mcap_str}</span></div>
+                    <div>52w High: <span style="color:#e8ddc7;font-weight:600;">₹{snapshot.get('week52High') or '—'}</span></div>
+                    <div>52w Low: <span style="color:#e8ddc7;font-weight:600;">₹{snapshot.get('week52Low') or '—'}</span></div>
+                </div>
+                """
+                st.markdown(html_block, unsafe_allow_html=True)
 
         st.write("")
         auto = st.checkbox("Auto — use an execution algorithm instead of a plain limit order", key="tt_auto")

@@ -3,3 +3,4 @@ requests
 pandas
 ephem
 streamlit-js-eval
+streamlit-keyup

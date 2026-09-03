@@ -5,12 +5,32 @@ from finance_mcp_server.py, but are plain functions (no MCP transport, no
 Firestore dependency) so they're cheap to call inline while handling a chat
 turn.
 """
+import contextvars
 import logging
 import os
 import requests
 import yfinance as yf
 
 log = logging.getLogger(__name__)
+
+# Carries the authenticated user's uid into the spending tool below WITHOUT
+# it ever being a model-supplied function-call argument — the model must
+# never get to choose whose Gmail/spending data a tool call reads. Set once
+# per request in agents.py's Orchestrator.process_query_async (via
+# set_current_uid) before the tool-calling loop runs, using the uid FastAPI
+# already verified from the caller's Firebase ID token — same trust
+# boundary as `location`, but even more important here since this one
+# touches another Google product's data. contextvars (not a plain module
+# global) so concurrent requests in the same process never leak each
+# other's uid.
+_current_uid: "contextvars.ContextVar[str | None]" = contextvars.ContextVar("current_uid", default=None)
+
+
+def set_current_uid(uid: str | None):
+    """Returns a Token; call _current_uid.reset(token) when the request
+    is done (see agents.py) so a later request on a reused thread/task
+    can't inherit a stale uid."""
+    return _current_uid.set(uid)
 
 # Bounds how many cached docs a single chat-triggered screen will scan —
 # matches the cap already used elsewhere (screener_data/mf_data read paths)
@@ -228,6 +248,145 @@ def get_market_data(ticker: str) -> dict:
     }
 
 
+def get_stock_snapshot(ticker: str) -> dict:
+    """Full quote-style snapshot for one stock — current price, day change %,
+    today's open/high/low, 52-week high/low, market cap, P/E, dividend
+    yield. Pulled LIVE from Yahoo Finance via the same resolver as
+    get_market_data (plain symbol, then .NS/.BO, then a name search), so it
+    works even for a stock too newly listed to be in the screener cache yet
+    (e.g. a stock that IPO'd this year). Prefer this over get_market_data
+    whenever the user wants a proper 'give me insight on this stock' style
+    answer with a real price/range snapshot to build the narrative around —
+    call it FIRST and write any qualitative analysis around these real
+    numbers, not from memory, since two runs estimating a P/E from memory
+    can silently disagree with each other and with reality."""
+    if not ticker or not ticker.strip():
+        return {"error": "No ticker provided."}
+
+    info = _fetch_ticker_info(ticker)
+    if info is None:
+        return {
+            "error": (
+                f"Could not resolve '{ticker}' to a live ticker on Yahoo Finance "
+                f"(tried plain symbol, .NS, and .BO suffixes, and a name search). "
+                f"It may be too newly listed to have data yet, or the name/symbol "
+                f"may need to be more precise."
+            )
+        }
+
+    price = info.get("currentPrice") or info.get("regularMarketPrice")
+    prev_close = info.get("previousClose")
+    day_change_pct = None
+    if price is not None and prev_close:
+        day_change_pct = round((price - prev_close) / prev_close * 100, 2)
+
+    from .screener_data import _pct  # reuse the same ratio-vs-percentage normalizer screener_data.py uses
+
+    # 1-year daily close history, for the price chart — kept in the return
+    # value here, but stripped out of what actually goes back into the
+    # model's context (see agents.py's route_meta capture) since the model
+    # only needs yearChangePct to narrate, not ~250 raw candles.
+    resolved_symbol = info.get("symbol") or ticker
+    price_history = []
+    year_change_pct = None
+    try:
+        hist = yf.Ticker(resolved_symbol).history(period="1y", interval="1d", auto_adjust=False)
+        closes = hist["Close"].dropna() if not hist.empty and "Close" in hist.columns else None
+        if closes is not None and len(closes) >= 2:
+            price_history = [
+                {"date": idx.strftime("%Y-%m-%d"), "close": round(float(v), 2)}
+                for idx, v in closes.items()
+            ]
+            first_close, last_close = float(closes.iloc[0]), float(closes.iloc[-1])
+            if first_close:
+                year_change_pct = round((last_close - first_close) / first_close * 100, 2)
+    except Exception as e:
+        log.warning("Price-history fetch failed for %s: %s", resolved_symbol, e)
+
+    return {
+        "symbol": info.get("symbol", ticker),
+        "shortName": info.get("shortName") or info.get("longName"),
+        "sector": info.get("sector"),
+        "industry": info.get("industry"),
+        "currentPrice": price,
+        "dayChangePct": day_change_pct,
+        "yearChangePct": year_change_pct,
+        "previousClose": prev_close,
+        "dayOpen": info.get("open") or info.get("regularMarketOpen"),
+        "dayHigh": info.get("dayHigh") or info.get("regularMarketDayHigh"),
+        "dayLow": info.get("dayLow") or info.get("regularMarketDayLow"),
+        "week52High": info.get("fiftyTwoWeekHigh"),
+        "week52Low": info.get("fiftyTwoWeekLow"),
+        "marketCap": info.get("marketCap"),
+        "trailingPE": info.get("trailingPE"),
+        "dividendYield": _pct(info.get("dividendYield")),  # already a clean percentage number, e.g. 0.35 meaning 0.35%
+        "priceHistory": price_history,  # [{"date": "YYYY-MM-DD", "close": float}, ...] — chart data only, see note above
+    }
+
+
+def get_peer_comparison(ticker: str, limit: int = 4) -> dict:
+    """Same-sector peer comparison table (price, market cap, P/E, ROE) for a
+    stock — resolves `ticker` live (same resolver as get_stock_snapshot) to
+    learn its sector, then pulls the closest-market-cap peers from the
+    cached screener universe (backend/app/screener_data.py). Use alongside
+    get_stock_snapshot whenever the user wants to see how a stock stacks up
+    against competitors, e.g. 'how does X compare to its peers'."""
+    if not ticker or not ticker.strip():
+        return {"error": "No ticker provided."}
+
+    info = _fetch_ticker_info(ticker)
+    if info is None:
+        return {"error": f"Could not resolve '{ticker}' to a live ticker on Yahoo Finance."}
+
+    sector = info.get("sector")
+    if not sector:
+        return {"error": f"Yahoo Finance doesn't list a sector for '{ticker}', so peers can't be matched."}
+
+    from .screener_data import db, STOCKS_COLLECTION
+    try:
+        target_mcap = info.get("marketCap") or 0
+        target_symbol = (info.get("symbol") or ticker).upper().replace(".NS", "").replace(".BO", "")
+        rows = []
+        for d in db.collection(STOCKS_COLLECTION).where("sector", "==", sector).limit(500).stream():
+            data = d.to_dict() or {}
+            if (data.get("symbol") or "").upper() != target_symbol:
+                rows.append(data)
+        rows.sort(key=lambda r: abs((r.get("market_cap") or 0) - target_mcap))
+        peers = rows[:limit]
+    except Exception as e:
+        log.error("Peer comparison lookup failed for %s: %s", ticker, e)
+        return {"error": str(e)}
+
+    if not peers:
+        return {
+            "error": (
+                f"No cached peers found in sector '{sector}' yet — the screener cache may not "
+                f"cover this sector well, or hasn't been refreshed recently. Try 'Populate now' "
+                f"on the Equity Screener page, or answer without a peer table this time."
+            )
+        }
+
+    return {
+        "symbol": target_symbol,
+        "sector": sector,
+        "target": {
+            "symbol": target_symbol,
+            "current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
+            "market_cap": info.get("marketCap"),
+            "pe_ratio": info.get("trailingPE"),
+            "roe": None,  # not present in yfinance's live .info; only available for cached/screened stocks
+        },
+        "peers": [
+            {
+                "symbol": r.get("symbol"), "name": r.get("name"),
+                "current_price": r.get("current_price"), "market_cap": r.get("market_cap"),
+                "pe_ratio": r.get("pe_ratio"), "roe": r.get("roe"),
+            }
+            for r in peers
+        ],
+    }
+
+
 def get_fund_data(fund_id: str) -> dict:
     if not fund_id or not fund_id.strip():
         return {"error": "No fund ticker provided."}
@@ -306,6 +465,106 @@ def _risk_band(score) -> str | None:
     if score < 75:
         return "High"
     return "Severe"
+
+
+TMDB_BASE = "https://api.themoviedb.org/3"
+
+
+def get_movie_info(title: str, year: int = None) -> dict:
+    """Real, current movie metadata from TMDB (The Movie Database) — a
+    genuinely free, official API (not a scraper): search for the title,
+    then pull full details + top cast/director for the best match. Used so
+    cinema_agent doesn't answer factual questions (release date, cast,
+    rating, runtime) from its own possibly-stale training memory.
+
+    Deliberately does NOT return showtimes, ticket prices, or seat
+    availability — TMDB has no concept of theatres/tickets at all. That
+    data is a separate concern (see the leisure_agent's web-search-grounded
+    showtimes table, or a future dedicated showtimes provider)."""
+    api_key = os.environ.get("TMDB_API_KEY") or _try_tmdb_secret()
+    if not api_key:
+        return {"error": "TMDB_API_KEY not configured — see gmail_spending.py-style setup note in tools_impls.py."}
+
+    try:
+        search_resp = requests.get(
+            f"{TMDB_BASE}/search/movie",
+            params={"api_key": api_key, "query": title, "year": year, "include_adult": False},
+            timeout=10,
+        )
+        search_resp.raise_for_status()
+        results = search_resp.json().get("results") or []
+        if not results:
+            return {"error": f"No TMDB match found for '{title}'."}
+        movie_id = results[0]["id"]
+
+        detail_resp = requests.get(
+            f"{TMDB_BASE}/movie/{movie_id}",
+            params={"api_key": api_key, "append_to_response": "credits"},
+            timeout=10,
+        )
+        detail_resp.raise_for_status()
+        data = detail_resp.json()
+    except requests.exceptions.RequestException as e:
+        log.warning("TMDB lookup failed for '%s': %s", title, e)
+        return {"error": f"Couldn't reach TMDB: {e}"}
+
+    credits = data.get("credits", {})
+    cast = [c.get("name") for c in (credits.get("cast") or [])[:5]]
+    director = next((c.get("name") for c in (credits.get("crew") or []) if c.get("job") == "Director"), None)
+    poster_path = data.get("poster_path")
+
+    return {
+        "title": data.get("title"),
+        "release_date": data.get("release_date"),
+        "overview": data.get("overview"),
+        "genres": [g.get("name") for g in (data.get("genres") or [])],
+        "runtime_minutes": data.get("runtime"),
+        "vote_average": data.get("vote_average"),
+        "vote_count": data.get("vote_count"),
+        "cast": cast,
+        "director": director,
+        "poster_url": f"https://image.tmdb.org/t/p/w342{poster_path}" if poster_path else None,
+        "tmdb_url": f"https://www.themoviedb.org/movie/{movie_id}",
+    }
+
+
+def _try_tmdb_secret() -> str | None:
+    """Falls back to Secret Manager (TMDB_API_KEY) if the env var isn't set
+    — same pattern as every other credential in this file, so a TMDB key
+    doesn't have to live in an env var/Cloud Run config if you'd rather
+    manage it alongside the app's other secrets."""
+    try:
+        from .secrets import access_secret_version
+        return access_secret_version("TMDB_API_KEY")
+    except Exception:
+        return None
+
+
+def get_upi_spending_summary(month: str = None, force_reparse: bool = False) -> dict:
+    """Monthly UPI/bank-debit spending, aggregated from the user's own
+    connected Gmail (see gmail_spending.py). `month` is optional "YYYY-MM";
+    omitted returns every month on record, most recent first. uid comes
+    ONLY from the server-verified request context (see set_current_uid
+    above), never from the model — a model asking "whose spending" isn't a
+    real question this tool accepts."""
+    uid = _current_uid.get()
+    if not uid:
+        return {"error": "No signed-in user for this session, so there's no spending data to read."}
+
+    from . import gmail_spending
+    if not gmail_spending.is_gmail_connected(uid):
+        return {
+            "error": "Gmail isn't connected for this account yet. Tell the user they can connect it "
+                     "from the assistant panel's settings to enable monthly UPI spending insights."
+        }
+    try:
+        # Cheap, incremental — already-seen messages are skipped (see
+        # fetch_and_store_upi_transactions), so this is fine to run inline
+        # before answering rather than requiring a separate manual sync.
+        gmail_spending.fetch_and_store_upi_transactions(uid, days_back=90, force_reparse=force_reparse)
+    except Exception as e:
+        log.warning("UPI Gmail sync failed inline, answering from previously stored data: %s", e)
+    return gmail_spending.get_monthly_spending_summary(uid, month=month)
 
 
 def get_safe_route(source: str, destination: str) -> dict:
@@ -392,6 +651,45 @@ TOOL_SCHEMAS = {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string", "description": "Ticker symbol or company name, e.g. AAPL, GC=F, 'Tempsens Instruments'"}
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    "get_stock_snapshot": {
+        "type": "function",
+        "function": {
+            "name": "get_stock_snapshot",
+            "description": (
+                "Get a full live quote-style snapshot for one stock — current price, day change %, "
+                "today's open/high/low, 52-week high/low, market cap, P/E, dividend yield. Call this "
+                "FIRST whenever the user asks for insight/analysis on a specific stock, and build the "
+                "narrative around these real numbers rather than estimating figures from memory."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string", "description": "Ticker symbol or company name, e.g. RELIANCE, 'Shadowfax Technologies'"}
+                },
+                "required": ["ticker"],
+            },
+        },
+    },
+    "get_peer_comparison": {
+        "type": "function",
+        "function": {
+            "name": "get_peer_comparison",
+            "description": (
+                "Get a same-sector peer comparison table (price, market cap, P/E, ROE) for a stock "
+                "against its closest-market-cap competitors. Use alongside get_stock_snapshot whenever "
+                "the user wants to see how a stock stacks up against peers, or asks a 'how does X "
+                "compare to Y/its competitors' style question."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string", "description": "Ticker symbol or company name"},
+                    "limit": {"type": "number", "description": "Max number of peers to return (default 4)"}
                 },
                 "required": ["ticker"],
             },
@@ -513,6 +811,44 @@ TOOL_SCHEMAS = {
                 "required": ["latitude", "longitude", "check_in_date", "check_out_date"]
             }
         }
+    },
+    "get_upi_spending_summary": {
+        "type": "function",
+        "function": {
+            "name": "get_upi_spending_summary",
+            "description": (
+                "Monthly UPI/bank-debit spending totals and top merchants, parsed from the "
+                "signed-in user's own connected Gmail account. Use this whenever the user asks "
+                "about their spending, expenses, or 'how much did I spend' this month/lately."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "month": {"type": "string", "description": "Optional specific month as YYYY-MM; omit for all recent months."},
+                    "force_reparse": {"type": "boolean", "description": "Pass true ONLY when the user explicitly asks to force a re-parse of already synced data to fix merchant classification."}
+                }
+            }
+        }
+    },
+    "get_movie_info": {
+        "type": "function",
+        "function": {
+            "name": "get_movie_info",
+            "description": (
+                "Real, current movie metadata from TMDB — release date, genres, runtime, rating, "
+                "cast, and director for a named film. Use whenever a factual detail about a "
+                "specific movie is needed (release date, cast, rating) rather than relying on "
+                "memory, which may be stale. Does NOT cover showtimes, ticket prices, or theatres."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "The movie's title."},
+                    "year": {"type": "number", "description": "Optional release year, to disambiguate remakes/same-titled films."}
+                },
+                "required": ["title"]
+            }
+        }
     }
 }
 
@@ -533,6 +869,8 @@ def _get_hotel_availability_wrapper(args):
 
 TOOL_IMPLS = {
     "get_market_data": lambda args: get_market_data(args.get("ticker", "")),
+    "get_stock_snapshot": lambda args: get_stock_snapshot(args.get("ticker", "")),
+    "get_peer_comparison": lambda args: get_peer_comparison(args.get("ticker", ""), args.get("limit", 4)),
     "get_fund_data": lambda args: get_fund_data(args.get("fund_id", "")),
     "get_macro_indicators": lambda args: get_macro_indicators(),
     "get_safe_route": lambda args: get_safe_route(args.get("source", ""), args.get("destination", "")),
@@ -556,4 +894,6 @@ TOOL_IMPLS = {
         sort_by=args.get("sort_by", "cagr_3y"), limit=args.get("limit", 10),
     ),
     "get_hotel_availability": _get_hotel_availability_wrapper,
+    "get_upi_spending_summary": lambda args: get_upi_spending_summary(args.get("month"), args.get("force_reparse", False)),
+    "get_movie_info": lambda args: get_movie_info(args.get("title", ""), args.get("year")),
 }

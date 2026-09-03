@@ -70,6 +70,18 @@ def refresh_status():
     return get_refresh_status()
 
 
+@router.get("/snapshot")
+def get_snapshot(ticker: str):
+    """Fetches live fundamental data (P/E, Market Cap, 52-week High/Low)
+    for a specific ticker directly from Yahoo Finance."""
+    from ..tools_impls import get_stock_snapshot
+    data = get_stock_snapshot(ticker)
+    if data and "error" in data:
+        raise HTTPException(status_code=404, detail=data["error"])
+    return data
+
+
+
 @router.post("/refresh")
 def refresh(batch_size: int = 150, full: bool = False, x_admin_key: Optional[str] = Header(default=None)):
     """

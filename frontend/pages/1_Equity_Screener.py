@@ -1,9 +1,18 @@
 import streamlit as st
 import requests
 
+from auth_helper import login_widget
+from ui_helpers import hide_streamlit_chrome, render_page_nav, predictive_search
+
 BACKEND_URL = "https://finance-prod-app-backend-36680800010.asia-south1.run.app"
 
-st.set_page_config(page_title="Equity Screener", layout="wide")
+st.set_page_config(page_title="Equity Screener", layout="wide", initial_sidebar_state="collapsed")
+hide_streamlit_chrome()
+
+if not login_widget(BACKEND_URL):
+    st.stop()
+
+render_page_nav()
 
 st.title("📊 Equity Screener — NSE & BSE")
 st.caption(
@@ -99,11 +108,22 @@ st.caption("One-time setup for automatic nightly refresh: raise the backend's re
            "job at `POST /api/screener/refresh?full=true` with `--time-zone=\"Asia/Kolkata\"` and cron `0 0 * * *` — "
            "then this page stays populated automatically and the button above is only needed for an occasional manual top-up.")
 
+from st_keyup import st_keyup
 sectors = fetch_sectors()
 
 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
 with c1:
-    search = st.text_input("Search by name or symbol", "")
+    if "eq_search_version" not in st.session_state:
+        st.session_state["eq_search_version"] = 0
+    search = st_keyup("Search by name or symbol", value=st.session_state.get("eq_search_value", ""), key=f"eq_search_box_{st.session_state['eq_search_version']}", debounce=300)
+    
+    if search and search != st.session_state.get("eq_last_picked"):
+        _picked = predictive_search(BACKEND_URL, "equity", search, key_prefix="eq")
+        if _picked:
+            st.session_state["eq_search_value"] = _picked[0]
+            st.session_state["eq_last_picked"] = _picked[0]
+            st.session_state["eq_search_version"] += 1
+            st.rerun()
 with c2:
     sector = st.selectbox("Sector", [""] + sectors)
 with c3:
