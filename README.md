@@ -167,11 +167,10 @@ breakout screen, the Trade Terminal with the live wallet balance, the Equity Scr
 
 - Push-based proactive alerts (not just "on open") when a tracked stock crosses a watch
   threshold or a portfolio holding has a corporate action.
-- Broader broker support beyond Angel One.
 - Backtesting the breakout screener's historical hit rate, and surfacing that transparently.
 - Deeper portfolio-level risk view (sector concentration, correlation) rather than
   per-trade-only risk checks.
-
+- Algorithm that can build winning portfolio on its own on the horizon of shortterm or intraday knd of positions for a autonomous winnning trade and side income
 ## 12. Team
 
 | Name | Role | Contact |
