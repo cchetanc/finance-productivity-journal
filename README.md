@@ -54,6 +54,7 @@ right analyst, rather than one generic chatbot bluffing its way through every do
 | 💳 **Gmail-based Spending Insights** | Opt-in, read-only parsing of UPI/bank-debit alert emails to summarize real monthly spending — closing the loop between "what I spend" and "what I can invest." |
 | 🌗 **Personal Journal & Voice** | A reflective daily journal with AI replies/summaries, and voice input for hands-free queries. |
 | 🔐 **Per-user, Firebase-authenticated data model** | Every data path (trades, journals, spending, credentials) is scoped to the signed-in user via server-verified UID — never client- or model-supplied. |
+| 🛡️ **Admin Panel & RBAC** | A dedicated admin dashboard backed by a Role-Based Access Control (RBAC) system. Admins can view provisioned users and toggle feature flags to control visibility of specific dashboard sections per user. |
 
 ## 4. Why This Is Different
 
@@ -70,7 +71,14 @@ right analyst, rather than one generic chatbot bluffing its way through every do
   as a momentum + volume-confirmation heuristic on real cached numbers — not dressed up as a
   guaranteed signal.
 
-## 5. Architecture
+## 5. Alignment with Challenge Criteria
+
+- **Authenticity (Originality & Unique Features):** Beyond the starter lab's standard Gemini conversational setup, we built an entire suite of financial features — live TradingView charts, a Breakout Screener, execution algorithms (VWAP, Iceberg), and a Gmail-based spending parser — turning a simple journal into a real actionable dashboard.
+- **Usability (SSO & Error-Free Interactions):** Leverages Firebase Authentication for frictionless, secure single sign-on. The multi-page app incorporates Streamlit fragment reruns to ensure snappy, error-free interactive elements (like type-ahead search) without triggering full-page loads.
+- **Stability (Robust Handling & Uptime):** Deployed resiliently on Google Cloud Run to guarantee high availability and scale-to-zero efficiency. Comprehensive fallback handlers ensure that if a live data source (like yfinance) fails, the app degrades gracefully rather than crashing.
+- **Security (Hardening & Access Controls):** Implements a strict Zero-Secrets policy using Google Cloud Secret Manager. The data model enforces hard partitioning via Firestore security rules (every read/write is strictly scoped to the server-verified Firebase UID). Additionally, an Admin-only RBAC layer prevents horizontal escalation.
+
+## 6. Architecture
 
 ```
 ┌──────────────────────────────┐         ┌───────────────────────────────────────┐
@@ -93,7 +101,7 @@ right analyst, rather than one generic chatbot bluffing its way through every do
                                           └───────────────────────────────────────────┘
 ```
 
-## 6. Tech Stack
+## 7. Tech Stack
 
 | Layer | Technology |
 |---|---|
@@ -106,7 +114,7 @@ right analyst, rather than one generic chatbot bluffing its way through every do
 | **Integrations** | Gmail API (OAuth, read-only) for spending insights, Google Cloud Speech-to-Text / Text-to-Speech for voice |
 | **Infra** | Deployed on Google Cloud Run |
 
-## 7. How It Works (User Flow)
+## 8. How It Works (User Flow)
 
 1. **Sign in** with Firebase Auth.
 2. **Ask the Daily Productivity Assistant** anything — "how's RELIANCE looking on NSE",
@@ -121,7 +129,7 @@ right analyst, rather than one generic chatbot bluffing its way through every do
 5. Every trade — from the terminal or from chat — is checked against your live wallet balance
    before it's sent, so you're told plainly if you're short, instead of finding out at the broker.
 
-## 8. Setup / Run Locally
+## 9. Setup / Run Locally
 
 ```bash
 # 1. Clone
@@ -145,11 +153,11 @@ streamlit run app.py
 > configured per-user from the Trade Terminal's "Connect Broker" panel. PAPER mode works out of
 > the box with no broker credentials.
 
-## 9. Demo
+## 10. Demo
 
 `<Demo video link>`
 
-## 10. Challenges We Ran Into
+## 11. Challenges We Ran Into
 
 - **Keeping the AI honest.** It's easy for an LLM to sound confident about numbers it invented.
   Every agent is tool-grounded — it can only cite what a real API/database call actually
@@ -161,7 +169,7 @@ streamlit run app.py
   interactions; we used fragment-scoped reruns for autocomplete/search so it feels closer to a
   native app instead of round-tripping the whole page per keystroke.
 
-## 11. What's Next
+## 12. What's Next
 
 - Push-based proactive alerts (not just "on open") when a tracked stock crosses a watch
   threshold or a portfolio holding has a corporate action.
@@ -170,7 +178,7 @@ streamlit run app.py
   per-trade-only risk checks.
 - Algorithm that can build winning portfolio on its own on the horizon of shortterm or intraday knd of positions for a autonomous winnning trade and side income.
 - A recommendation from an expert quant analyst which we might want to take up immediately, in such case messaging the agent should complete the task.
-## 12. Team
+## 13. Team
 
 | Name | Contact |
 |---|---|---|
