@@ -808,6 +808,68 @@ def get_stock_detail(yf_symbol: str) -> dict | None:
     return data
 
 
+def get_breakout_candidates(limit: int = 5, min_volume_growth: float = 40.0, min_five_day_change: float = 3.0) -> dict:
+    """'Quant desk' breakout-style screen — reads the screener cache only (no
+    live yfinance calls, same as get_market_movers above), looking for stocks
+    that are BOTH:
+      - up meaningfully over the last 5 sessions (min_five_day_change, %), and
+      - trading on unusually high volume vs. their own recent average
+        (min_volume_growth, %) — the volume confirms the move isn't just
+        noise.
+    This is a real, transparent momentum+volume heuristic computed off
+    actual cached numbers — NOT technical pattern recognition (no support/
+    resistance line detection, no chart-pattern matching), and it is not a
+    guarantee of a genuine breakout. Callers (the quant agent) must present
+    it to the user as exactly that: a screened shortlist worth a closer
+    look, not a certainty. Returns candidates sorted by a simple composite
+    score (five_day_change_pct * volume_growth), highest first."""
+    docs = list(db.collection(STOCKS_COLLECTION)
+                .where("volume_growth", ">=", min_volume_growth)
+                .limit(2000).stream())
+    rows = [d.to_dict() for d in docs]
+
+    candidates = [
+        r for r in rows
+        if r.get("five_day_change_pct") is not None
+        and r.get("five_day_change_pct") >= min_five_day_change
+        and r.get("current_price")
+    ]
+
+    if not candidates:
+        return {
+            "note": (
+                "No cached stocks currently clear both thresholds "
+                f"(5-day move ≥ {min_five_day_change}% and volume growth ≥ {min_volume_growth}%) — "
+                "either the screener cache hasn't run recently, or there's genuinely nothing "
+                "showing that combination of momentum + volume confirmation right now."
+            ),
+            "candidates": [],
+        }
+
+    candidates.sort(
+        key=lambda r: (r.get("five_day_change_pct") or 0) * (r.get("volume_growth") or 0),
+        reverse=True,
+    )
+
+    return {
+        "note": (
+            "Screened from cached daily data for 5-day price momentum + confirming volume growth — "
+            "a quantitative shortlist worth a closer look, not a guaranteed breakout or a recommendation "
+            "to trade without further checking the chart/fundamentals."
+        ),
+        "candidates": [
+            {
+                "symbol": r.get("symbol"), "exchange": r.get("exchange"), "name": r.get("name"),
+                "sector": r.get("sector"), "price": r.get("current_price"),
+                "five_day_change_pct": r.get("five_day_change_pct"),
+                "volume_growth_pct": r.get("volume_growth"),
+                "day_change_pct": r.get("day_change_pct"),
+            }
+            for r in candidates[:limit]
+        ],
+    }
+
+
 def get_sectors() -> list:
     docs = db.collection(STOCKS_COLLECTION).select(["sector"]).limit(20000).stream()
     return sorted({d.to_dict().get("sector") for d in docs if d.to_dict().get("sector")})

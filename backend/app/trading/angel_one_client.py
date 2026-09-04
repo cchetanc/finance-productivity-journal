@@ -20,6 +20,7 @@ from SmartApi import SmartConnect
 from .broker_base import (
     BrokerClient,
     BrokerError,
+    Funds,
     OrderRequest,
     OrderResult,
     OrderSide,
@@ -206,3 +207,38 @@ class AngelOneClient(BrokerClient):
         if not resp.get("status"):
             raise BrokerError(f"position fetch failed: {resp.get('message')}")
         return resp.get("data") or []
+
+    async def get_funds(self) -> Funds:
+        """Available margin/cash via Angel One's RMS ('Risk Management System')
+        limits API — this is the same figure the Angel One app itself shows as
+        your available balance. `availablecash` is what SmartAPI's rmsLimit()
+        actually calls the free-to-trade cash component; `net` is their total
+        (cash + collateral - utilised)."""
+        conn = self._require_conn()
+
+        def _rms():
+            return conn.rmsLimit()
+
+        resp = await asyncio.to_thread(_rms)
+        if not resp.get("status"):
+            raise BrokerError(f"rmsLimit (funds) fetch failed: {resp.get('message')}")
+        data = resp.get("data") or {}
+
+        def _f(key):
+            try:
+                return float(data[key]) if data.get(key) not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        available = _f("availablecash")
+        if available is None:
+            # Some accounts/plans omit availablecash; net is the next-best figure.
+            available = _f("net") or 0.0
+
+        return Funds(
+            available_cash=round(available, 2),
+            net=_f("net"),
+            utilised_debits=_f("utiliseddebits"),
+            collateral=_f("collateral"),
+            raw=data,
+        )

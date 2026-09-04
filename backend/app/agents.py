@@ -382,15 +382,18 @@ quants_agent = SimpleAgent(
     name="quants_agent",
     model=MODEL_NAME,
     description=(
-        "Quantitative analyst — risk/statistics math: Sharpe/Sortino, volatility, VaR, correlation, "
-        "options/derivatives pricing intuition, and backtesting-style reasoning."
+        "Quantitative analyst — risk/statistics math (Sharpe/Sortino, volatility, VaR, correlation, "
+        "options/derivatives pricing intuition, backtesting-style reasoning), PLUS a real breakout-"
+        "candidate screener and the ability to place a trade once the user confirms one."
     ),
     instruction="""
         You are a Quantitative Analyst (Quant). You reason in numbers and probabilities, not narrative
-        opinion. Structure your answer:
+        opinion. You have two distinct modes — figure out which one the user's message actually needs:
+
+        MODE 1 — QUANT MATH (Sharpe/Sortino, volatility, VaR, correlation, options/derivatives pricing
+        intuition, backtest-style stats): structure your answer as
         1. Framing the quantitative question — restate what's actually being measured or modeled.
-        2. Method — the relevant formula/metric/approach (e.g. Sharpe ratio, annualized volatility,
-           Value-at-Risk, Black-Scholes intuition for options, correlation/beta), explained briefly.
+        2. Method — the relevant formula/metric/approach, explained briefly.
         3. Worked numbers — if the user gave numbers, compute with them and show the arithmetic; if not,
            use clearly-labeled illustrative numbers and say so explicitly rather than presenting them as
            the user's real figures.
@@ -398,9 +401,37 @@ quants_agent = SimpleAgent(
         5. Caveats — the model's key assumptions and where they break down (fat tails, regime shifts,
            small sample size, non-stationarity).
         Use 'get_macro_indicators' or 'get_market_data' if live prices/yields would sharpen the numbers.
+
+        MODE 2 — BREAKOUT SCREEN & TRADE EXECUTION: when the user asks for stocks "about to break out",
+        momentum plays, or wants you to "act like a quant analyst and recommend some trades":
+        1. Call 'scan_breakout_candidates' — never invent candidates. If it returns no candidates or an
+           error, say so plainly (e.g. "nothing clearing the screen right now") rather than making names up.
+        2. Present the real candidates it returns: symbol, name, price, the 5-day move %, and the volume
+           growth % that confirms it. Be explicit that this is a momentum+volume heuristic from cached
+           data, NOT a chart-pattern-confirmed breakout and NOT a guarantee — a shortlist worth a closer
+           look, not a certainty.
+        3. Ask which one (if any) they'd like you to act on, and at what size (quantity) — do not assume
+           a quantity.
+        4. ONLY once the user has clearly confirmed ONE specific candidate with a quantity (e.g. "yes,
+           buy 10 of RELIANCE", "go ahead with the first one, 20 shares", or a follow-up "okay"/"do it"
+           that unambiguously refers to a single specific stock+quantity you JUST proposed): call
+           'place_trade_order' for that exact symbol/side/quantity. Default order_type="MARKET",
+           mode="PAPER" — only pass mode="LIVE" if the user explicitly used the words "live" or "real
+           money"/"real order" for this specific trade. A vague "sounds good" about the screen in general,
+           with no specific stock+quantity picked, is NOT confirmation — ask which one and how many first.
+        5. Relay the result plainly: if insufficient_funds is true, tell the user clearly the order was
+           NOT placed because of insufficient balance, and state the required vs. available amounts from
+           the result — do not retry with a smaller size unless they ask you to. If it succeeded, confirm
+           what was actually filled (quantity, average price, status). If it failed for another reason,
+           relay that error plainly rather than guessing why.
+        Never call 'place_trade_order' more than once per explicit user confirmation, and never chain
+        multiple trades from one confirmation.
     """,
     output_key="quants_insight",
-    tools=["get_macro_indicators", "get_market_data", "query_equity_screener", "query_mutual_fund_screener"],
+    tools=[
+        "get_macro_indicators", "get_market_data", "query_equity_screener", "query_mutual_fund_screener",
+        "scan_breakout_candidates", "place_trade_order",
+    ],
 )
 
 finance_analyst_agent = SimpleAgent(
@@ -1044,8 +1075,12 @@ class Orchestrator:
         - EQUITY vs FINANCE_ANALYST: "should I buy/is this a good investment" is EQUITY. "What do this
           company's numbers/financials/earnings actually look like" (fundamentals read, not a buy call)
           is FINANCE_ANALYST.
-        - QUANTS: only for genuinely quantitative asks — Sharpe/Sortino ratio, volatility/VaR,
-          correlation, options/derivatives pricing/greeks, backtest-style statistical reasoning.
+        - QUANTS: genuinely quantitative asks — Sharpe/Sortino ratio, volatility/VaR, correlation,
+          options/derivatives pricing/greeks, backtest-style statistical reasoning. ALSO covers
+          breakout-candidate screening ("stocks about to break out", "momentum plays", "act like a
+          quant analyst and recommend some trades") and placing a trade the user is confirming in
+          response to such a recommendation — including a bare "okay"/"do it"/"go ahead" that clearly
+          continues a breakout recommendation QUANTS just made (see BARE ACKNOWLEDGMENTS above).
         - CHARTERED_ASSOCIATE: tax or accounting treatment specifically — capital gains tax, TDS, GST,
           ITR filing, indexation, tax-loss harvesting.
         - INSURANCE: life/health/term/vehicle/property insurance coverage, premiums, claims, policy
@@ -1254,6 +1289,12 @@ class Orchestrator:
                             route_meta["peers"] = result
                         if tool_name == "get_movie_info" and isinstance(result, dict) and "error" not in result:
                             route_meta["movie_info"] = result
+                        if tool_name == "scan_breakout_candidates" and isinstance(result, dict) and "error" not in result:
+                            route_meta["breakout_candidates"] = result
+                        if tool_name == "place_trade_order" and isinstance(result, dict):
+                            # Keep only the LAST trade result if the model somehow calls this more than
+                            # once in a turn (it's instructed not to) — one confirmation, one trade, one card.
+                            route_meta["trade_result"] = result
 
                         response_parts.append(
                             genai_types.Part.from_function_response(name=tool_name, response=result)

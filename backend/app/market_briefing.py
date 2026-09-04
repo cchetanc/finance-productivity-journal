@@ -180,7 +180,11 @@ verbatim; synthesize it.
 
 def generate_intraday_update(now_ist: datetime | None = None) -> str:
     """"How's the market been going so far today" — for someone connecting
-    mid-session, using the same live index breadth as the dashboard."""
+    mid-session, using the same live index breadth as the dashboard. Also
+    where the proactive breakout shortlist lives: this is the one message
+    generated automatically (once per market-hours phase per day — see the
+    module docstring) rather than only on request, so it's the closest
+    thing this app has to the quant desk "flagging" names on its own."""
     now_ist = now_ist or datetime.now(IST)
     try:
         indices = get_live_indices()
@@ -190,11 +194,23 @@ def generate_intraday_update(now_ist: datetime | None = None) -> str:
         logging.warning(f"[intraday] live data fetch failed: {e}")
         indices, mood, headlines = [], {"bias": "NEUTRAL", "macro_risk_flags": []}, []
 
+    try:
+        from .screener_data import get_breakout_candidates
+        breakout = get_breakout_candidates(limit=3)
+    except Exception as e:
+        logging.warning(f"[intraday] breakout screen failed: {e}")
+        breakout = {"candidates": []}
+
     idx_lines = "\n".join(
         f"- {i['name']}: {i['price']:,.2f} ({'+' if i['positive'] else ''}{i['change_pct']:.2f}%)"
         for i in indices if i.get("price")
     ) or "No live index data available."
     news_lines = "\n".join(f"- {h}" for h in headlines) or "No fresh headlines fetched this run."
+    breakout_lines = "\n".join(
+        f"- {c['symbol']} ({c.get('name') or ''}): ₹{c['price']}, up {c['five_day_change_pct']}% over 5 "
+        f"sessions on {c['volume_growth_pct']}% higher volume"
+        for c in breakout.get("candidates") or []
+    ) or "None clearing the volume+momentum screen right now."
 
     prompt = f"""You are a markets desk assistant. The user has just opened the chat
 mid-session, at {now_ist.strftime('%H:%M')} IST while the NSE/BSE market is live.
@@ -207,11 +223,20 @@ Notable moves: {', '.join(mood.get('macro_risk_flags') or []) or 'none notable'}
 Recent headlines:
 {news_lines}
 
-Write a short (90-130 word) chat message, addressed directly to the user, that:
+Breakout screen (5-day momentum confirmed by volume growth — a heuristic shortlist, not a
+guaranteed breakout and not a recommendation to act without a closer look):
+{breakout_lines}
+
+Write a short (110-150 word) chat message, addressed directly to the user, that:
 1. Greets them briefly and states how the market has been trading so far today.
 2. Calls out the standout index move(s) and, if a headline clearly explains a move, ties
    it in briefly.
-3. Ends by inviting them to ask about a specific stock, sector, or something off-market
+3. If the breakout screen above found real candidates, name them with their actual numbers
+   (price, 5-day move %, volume growth %) as a shortlist worth a look — explicitly call this a
+   screened heuristic, not a certainty, and invite the user to say the word if they'd like a
+   paper trade placed on one of them. If the screen found nothing, don't mention it at all —
+   don't manufacture a "nothing to report" line about it.
+4. Ends by inviting them to ask about a specific stock, sector, or something off-market
    entirely.
 Natural conversational prose, no markdown headers/bullets, no invented numbers beyond
 what's given above.

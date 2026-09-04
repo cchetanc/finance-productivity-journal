@@ -174,7 +174,8 @@ def auth_headers() -> dict:
 
 def logout():
     for k in ("fb_id_token", "fb_refresh_token", "fb_token_expiry", "fb_email",
-              "fb_role", "fb_provisioned", "fb_features"):
+              "fb_role", "fb_provisioned", "fb_features", "voice_history",
+              "chat_loaded_date", "cfa_persona"):
         st.session_state.pop(k, None)
 
 

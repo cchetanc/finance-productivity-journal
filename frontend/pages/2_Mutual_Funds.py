@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 
 from auth_helper import login_widget
-from ui_helpers import hide_streamlit_chrome, render_page_nav, predictive_search
+from ui_helpers import hide_streamlit_chrome, render_page_nav, render_typeahead_search
 
 BACKEND_URL = "https://finance-prod-app-backend-36680800010.asia-south1.run.app"
 
@@ -98,20 +98,14 @@ st.caption("One-time setup for automatic nightly refresh: raise the backend's re
 
 categories = fetch_categories()
 
-from st_keyup import st_keyup
 c1, c2, c3 = st.columns([2, 1, 1])
 with c1:
-    if "mf_search_version" not in st.session_state:
-        st.session_state["mf_search_version"] = 0
-    search = st_keyup("Search by scheme name", value=st.session_state.get("mf_search_value", ""), key=f"mf_search_box_{st.session_state['mf_search_version']}", debounce=300)
-    
-    if search and search != st.session_state.get("mf_last_picked"):
-        _picked = predictive_search(BACKEND_URL, "mf", search, key_prefix="mf")
-        if _picked:
-            st.session_state["mf_search_value"] = _picked[0]
-            st.session_state["mf_last_picked"] = _picked[0]
-            st.session_state["mf_search_version"] += 1
-            st.rerun()
+    # Fragment-scoped type-ahead: suggestions appear as fast as the Strategy dropdown
+    # on the Trade Terminal, and the table below only refetches once you pick one.
+    search = render_typeahead_search(
+        BACKEND_URL, "mf", key_prefix="mf",
+        label="Search by scheme name", placeholder="e.g. Parag Parikh Flexi Cap",
+    )
 with c2:
     category = st.selectbox("Category", [""] + categories)
 with c3:

@@ -1,6 +1,7 @@
-streamlit
+streamlit>=1.37.0
 requests
 pandas
 ephem
 streamlit-js-eval
 streamlit-keyup
+markdown

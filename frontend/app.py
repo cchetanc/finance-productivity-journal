@@ -2,6 +2,8 @@ import base64
 import html
 import re
 import datetime
+import textwrap
+import uuid
 from urllib.parse import urlparse, quote
 import streamlit as st
 import streamlit.components.v1 as components
@@ -58,57 +60,54 @@ iframe { display: block; }
 </style>
 """, unsafe_allow_html=True)
 
-def _svg_price_chart(history: list, width: int = 560, height: int = 150) -> str:
-    """Renders a 1-year daily-close line chart as inline SVG (green line +
-    gradient fill under it, matching the app's own accent color, plus a
-    handful of evenly-spaced month labels) — no plotting library needed,
-    and it fits the app's existing dark theme better than Streamlit's
-    default chart widgets would. Not interactive (no hover/range-toggle) —
-    a fixed 1-year view, same period the backend fetches."""
-    closes = [h.get("close") for h in (history or []) if h.get("close") is not None]
-    dates = [h.get("date") for h in (history or []) if h.get("close") is not None]
-    if len(closes) < 2:
-        return ""
+def _tradingview_symbol(yf_symbol: str) -> str:
+    """Converts a yfinance-resolved symbol (e.g. 'RELIANCE.NS', '500325.BO')
+    into TradingView's EXCHANGE:SYMBOL format. Falls back to the bare symbol
+    (no prefix) for anything without a recognized Indian-exchange suffix —
+    TradingView's widget still resolves plain US tickers like 'AAPL' fine
+    without an explicit exchange prefix."""
+    s = (yf_symbol or "").strip()
+    if s.upper().endswith(".NS"):
+        return f"NSE:{s[:-3].upper()}"
+    if s.upper().endswith(".BO"):
+        return f"BSE:{s[:-3].upper()}"
+    return s.upper()
 
-    lo, hi = min(closes), max(closes)
-    span = (hi - lo) or 1
-    pad_top, pad_bottom = 8, 22
-    plot_h = height - pad_top - pad_bottom
-    n = len(closes)
 
-    def xy(i, v):
-        x = (i / (n - 1)) * width
-        y = pad_top + (1 - (v - lo) / span) * plot_h
-        return x, y
-
-    pts = [xy(i, v) for i, v in enumerate(closes)]
-    line_pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
-    area_pts = f"0,{height - pad_bottom} " + line_pts + f" {width},{height - pad_bottom}"
-    last_x, last_y = pts[-1]
-
-    tick_idxs = sorted(set([0, n // 3, (2 * n) // 3, n - 1]))
-    ticks_svg = ""
-    for idx in tick_idxs:
-        tx, _ = pts[idx]
-        try:
-            label = datetime.datetime.strptime(dates[idx], "%Y-%m-%d").strftime("%b %Y")
-        except Exception:
-            label = ""
-        ticks_svg += f'<text x="{tx:.1f}" y="{height - 6}" font-size="9" fill="#8a7d5f" text-anchor="middle">{html.escape(label)}</text>'
-
+def _tradingview_chart_html(yf_symbol: str, height: int = 420) -> str:
+    """Real interactive candlestick chart (pan/zoom, timeframe switcher,
+    indicators) via TradingView's free embeddable "Advanced Real-Time
+    Chart" widget — replaces the old static SVG line (which just traced a
+    flat line through daily closes and looked like a screenshot, with no
+    interactivity). Renders client-side in the visitor's own browser via
+    components.html's sandboxed iframe, so it needs no server-side
+    plotting library and no data of our own beyond the symbol."""
+    tv_symbol = _tradingview_symbol(yf_symbol)
+    container_id = f"tv_chart_{abs(hash(tv_symbol))}_{uuid.uuid4().hex[:6]}"
     return f'''
-<svg viewBox="0 0 {width} {height}" width="100%" height="{height}" preserveAspectRatio="none" style="display:block;">
-  <defs>
-    <linearGradient id="priceFill{n}" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#8fae64" stop-opacity="0.35"/>
-      <stop offset="100%" stop-color="#8fae64" stop-opacity="0"/>
-    </linearGradient>
-  </defs>
-  <polygon points="{area_pts}" fill="url(#priceFill{n})" stroke="none"/>
-  <polyline points="{line_pts}" fill="none" stroke="#8fae64" stroke-width="1.6"/>
-  <circle cx="{last_x:.1f}" cy="{last_y:.1f}" r="3.2" fill="#8fae64"/>
-  {ticks_svg}
-</svg>
+<div class="tradingview-widget-container" style="height:{height}px;">
+  <div id="{container_id}" style="height:100%;"></div>
+</div>
+<script src="https://s3.tradingview.com/tv.js"></script>
+<script>
+new TradingView.widget({{
+  "autosize": true,
+  "symbol": "{tv_symbol}",
+  "interval": "D",
+  "timezone": "Asia/Kolkata",
+  "theme": "dark",
+  "style": "1",
+  "locale": "en",
+  "toolbar_bg": "#1a1610",
+  "backgroundColor": "#15120e",
+  "gridColor": "rgba(70, 59, 40, 0.35)",
+  "enable_publishing": false,
+  "hide_side_toolbar": false,
+  "allow_symbol_change": false,
+  "save_image": false,
+  "container_id": "{container_id}"
+}});
+</script>
 '''
 
 
@@ -931,310 +930,231 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open and st.session_state
     st.session_state.greeted = True
 
 if _daily_agent_enabled and st.session_state.cfa_panel_open:
-    with st.container(key="cfa_panel"):
-        st.markdown(
-            '<div style="font-size:13px;font-weight:900;letter-spacing:1px;color:#f6efdc;'
-            'text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;gap:8px;">'
-            '<span style="font-size:18px;">🤖</span> Daily Productivity Assistant</div>',
-            unsafe_allow_html=True
-        )
-        st.markdown(f'<div class="cfa-disclaimer">{html.escape(CFA_DISCLAIMER)}</div>', unsafe_allow_html=True)
-        if st.session_state.user_location:
+    @st.fragment
+    def render_cfa_panel():
+        with st.container(key="cfa_panel"):
             st.markdown(
-                f'<div style="font-size:11px;color:#8fae64;margin:-6px 0 10px 0;">'
-                f'📍 Using your location for nearby suggestions: {html.escape(st.session_state.user_location)}</div>',
-                unsafe_allow_html=True,
+                '<div style="font-size:13px;font-weight:900;letter-spacing:1px;color:#f6efdc;'
+                'text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;gap:8px;">'
+                '<span style="font-size:18px;">🤖</span> Daily Productivity Assistant</div>',
+                unsafe_allow_html=True
             )
-        elif get_geolocation is None:
-            st.markdown(
-                '<div style="font-size:11px;color:#8f7f5d;margin:-6px 0 10px 0;">'
-                '📍 Location lookup unavailable — ask "movies near [your area]" instead.</div>',
-                unsafe_allow_html=True,
-            )
-
-        # ── Top-headlines strip removed — Global/National/Local headlines
-        # now live as their own tiles on the main dashboard (Row 2), so
-        # repeating them inside this chat panel was redundant.
-
-        # ── Gmail connect — enables the spending_agent's "how did my
-        # spending look" answers (see backend/app/gmail_spending.py). A
-        # separate, explicit Google consent grant from Firebase login itself
-        # — logging into this app never implies Gmail access was granted.
-        with st.expander("🔗 Connect Gmail for spending insights", expanded=False):
-            _qp = st.query_params
-            if _qp.get("gmail_connect") == "success":
-                st.success("Gmail connected — ask about your spending any time.")
-                st.query_params.clear()
-            elif _qp.get("gmail_connect") == "error":
-                st.error(f"Gmail connection failed ({_qp.get('reason', 'unknown error')}). Try again.")
-                st.query_params.clear()
-
-            _token = get_id_token()
-            if not _token:
-                st.caption("Log in first to connect Gmail.")
-            else:
-                _headers = {"Authorization": f"Bearer {_token}"}
-                try:
-                    _status = requests.get(f"{BACKEND_URL}/api/gmail/status", headers=_headers, timeout=10).json()
-                except Exception:
-                    _status = {"connected": False}
-
-                if _status.get("connected"):
-                    st.markdown("✅ **Gmail connected** — UPI/bank debit alerts are being scanned for spending insights.")
-                    gcol1, gcol2, gcol3 = st.columns(3)
-                    with gcol1:
-                        if st.button("Refresh spending data", key="gmail_sync_btn"):
-                            try:
-                                r = requests.post(f"{BACKEND_URL}/api/gmail/sync", headers=_headers, timeout=60)
-                                r.raise_for_status()
-                                st.success(f"Synced — {r.json().get('new_transactions_stored', 0)} new transactions found.")
-                            except Exception as e:
-                                st.error(f"Sync failed: {e}")
-                    with gcol2:
-                        # Ordinary refresh above only picks up NEW mail —
-                        # transactions already stored keep whatever merchant
-                        # the parser extracted at the time, even after a
-                        # parsing-logic fix. This re-parses every stored
-                        # transaction with today's logic, correcting things
-                        # like a helpline number or boilerplate phrase
-                        # ("help you") that got mistaken for a merchant
-                        # before. Slower than a normal refresh since it
-                        # re-fetches every matched email, not just new ones.
-                        if st.button("Fix past entries", key="gmail_reparse_btn", help="Re-parses all previously-synced transactions with the latest merchant-extraction logic — use this once if old summaries show odd merchant names like a phone number or 'help you'."):
-                            try:
-                                r = requests.post(
-                                    f"{BACKEND_URL}/api/gmail/sync",
-                                    params={"force_reparse": "true"},
-                                    headers=_headers, timeout=120,
-                                )
-                                r.raise_for_status()
-                                st.success(f"Re-parsed — {r.json().get('new_transactions_stored', 0)} transactions updated.")
-                            except Exception as e:
-                                st.error(f"Re-parse failed: {e}")
-                    with gcol3:
-                        if st.button("Disconnect", key="gmail_disconnect_btn"):
-                            try:
-                                requests.post(f"{BACKEND_URL}/api/gmail/disconnect", headers=_headers, timeout=10)
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Disconnect failed: {e}")
-                else:
-                    st.caption(
-                        "Connect your Gmail (read-only) so I can spot UPI/bank debit alerts and "
-                        "answer things like \"how did my spending go this month?\". Nothing else in "
-                        "your inbox is read."
-                    )
-                    if st.button("Connect Gmail", key="gmail_connect_btn"):
-                        try:
-                            r = requests.get(f"{BACKEND_URL}/api/gmail/auth-url", headers=_headers, timeout=10)
-                            r.raise_for_status()
-                            auth_url = r.json().get("auth_url")
-                            st.markdown(f'<a href="{auth_url}" target="_self">Click here to continue to Google →</a>', unsafe_allow_html=True)
-                        except Exception as e:
-                            st.error(f"Couldn't start Gmail connection: {e}")
-
-        # Persona + voice-reply controls
-        ctrl1, ctrl2 = st.columns([2, 1.6])
-        with ctrl1:
-            persona = st.selectbox(
-                "Voice", ["Aoede", "Kore", "Puck", "Charon", "Fenrir"],
-                key="cfa_persona", label_visibility="collapsed"
-            )
-        with ctrl2:
-            speak_reply = st.toggle("🔊 Speak reply", value=False, key="cfa_speak_reply")
-
-        def call_assistant(prompt_text: str = "", audio_b64: str = None) -> bool:
-            """Sends a text or voice turn to the backend and appends the exchange to
-            history. Returns True on success, False on failure, so callers can skip
-            st.rerun() on failure — without that, an error banner from a failed call
-            would be replaced by the rerun before ever reaching the screen."""
-            mode_val = "VOICE" if speak_reply else "TEXT"
-            # Last few turns, oldest first, so the backend router can tell a short
-            # follow-up (e.g. a bare city name answering "which city are you in?")
-            # apart from a brand-new, context-free query.
-            recent_history = [
-                {"role": "assistant" if m["role"] == "cfa" else "user", "text": m["text"]}
-                for m in st.session_state.voice_history[-6:]
-            ]
-            with st.spinner("Routing your question to the right specialist..."):
-                try:
-                    resp = requests.post(f"{BACKEND_URL}/api/market/voice", json={
-                        "prompt": prompt_text,
-                        "audio_in_base64": audio_b64 or "",
-                        "persona": persona,
-                        "session_id": "demo_session_1",
-                        "mode": mode_val,
-                        "location": st.session_state.user_location,
-                        "history": recent_history,
-                        "id_token": get_id_token(),
-                    }, timeout=60)
-
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        # Show what was actually understood (transcript) if it was a voice message
-                        displayed_user_text = data.get("transcript") or prompt_text or "(voice message)"
-                        st.session_state.voice_history.append({"role": "user", "text": displayed_user_text})
-                        st.session_state.voice_history.append({
-                            "role": "cfa",
-                            "text": data.get("text", "No response received."),
-                            "audio": data.get("audio_base64"),
-                            "route": data.get("route"),
-                        })
-                        return True
-                    else:
-                        try:
-                            detail = resp.json().get("detail", resp.text)
-                        except Exception:
-                            detail = resp.text
-                        st.error(f"Error {resp.status_code}: {detail}")
-                        return False
-                except Exception as e:
-                    st.error(f"Connection failed: {e}")
-                    return False
-
-        # Auto-send a query queued elsewhere in the app (e.g. a quick-action
-        # button) — the panel just opened this rerun, so send it once now
-        # rather than waiting for the user to retype it.
-        if st.session_state.get("pending_cfa_query"):
-            _pending = st.session_state.pending_cfa_query
-            st.session_state.pending_cfa_query = None
-            if call_assistant(prompt_text=_pending):
-                st.rerun()
-
-        # ── Scrollable message history — its own fixed-height reading area,
-        # separate from the input controls below it ──
-        with st.container(height=380, border=False):
-            if not st.session_state.voice_history:
+            st.markdown(f'<div class="cfa-disclaimer">{html.escape(CFA_DISCLAIMER)}</div>', unsafe_allow_html=True)
+            if st.session_state.user_location:
                 st.markdown(
-                    '<div class="cfa-empty-state">Ask about a stock, fund, sector, or your '
-                    'portfolio — the desk is standing by.</div>',
-                    unsafe_allow_html=True
+                    f'<div style="font-size:11px;color:#8fae64;margin:-6px 0 10px 0;">'
+                    f'📍 Using your location for nearby suggestions: {html.escape(st.session_state.user_location)}</div>',
+                    unsafe_allow_html=True,
                 )
-            for msg in st.session_state.voice_history:
-                if msg["role"] == "user":
-                    st.markdown(f'''
-                    <div class="cfa-bubble-row" style="justify-content:flex-end;">
-                        <div class="cfa-bubble" style="background:#2c2417;border:1px solid #463b28;
-                            border-radius:14px 14px 2px 14px;color:#f6efdc;">
-                            {html.escape(msg["text"])}
-                        </div>
-                        <div class="cfa-avatar" style="background:#463b28;color:#f6efdc;">U</div>
-                    </div>
-                    ''', unsafe_allow_html=True)
-                elif msg["role"] == "cfa":
-                    clean_text = _clean_cfa_text(msg["text"])
-                    # Which desk(s) actually answered this turn (see agents.py
-                    # Orchestrator.process_query_async -> route_meta["agent_labels"]).
-                    # Replaces the old hardcoded "Consulting the CFA desk..." — a
-                    # movie question now visibly shows "Cinema Desk" / "Leisure
-                    # Concierge" instead of implying everything goes through CFA.
-                    _labels = (msg.get("route") or {}).get("agent_labels") or []
-                    _label_html = ""
-                    if _labels:
-                        _label_html = (
-                            '<div style="font-size:10px;font-weight:700;letter-spacing:0.5px;'
-                            'text-transform:uppercase;color:#8fae64;margin:0 0 3px 44px;">'
-                            f'{html.escape(" + ".join(_labels))}</div>'
+            elif get_geolocation is None:
+                st.markdown(
+                    '<div style="font-size:11px;color:#8f7f5d;margin:-6px 0 10px 0;">'
+                    '📍 Location lookup unavailable — ask "movies near [your area]" instead.</div>',
+                    unsafe_allow_html=True,
+                )
+    
+            # ── Top-headlines strip removed — Global/National/Local headlines
+            # now live as their own tiles on the main dashboard (Row 2), so
+            # repeating them inside this chat panel was redundant.
+    
+            # ── Gmail connect — enables the spending_agent's "how did my
+            # spending look" answers (see backend/app/gmail_spending.py). A
+            # separate, explicit Google consent grant from Firebase login itself
+            # — logging into this app never implies Gmail access was granted.
+            with st.expander("🔗 Connect Gmail for spending insights", expanded=False):
+                _qp = st.query_params
+                if _qp.get("gmail_connect") == "success":
+                    st.success("Gmail connected — ask about your spending any time.")
+                    st.query_params.clear()
+                elif _qp.get("gmail_connect") == "error":
+                    st.error(f"Gmail connection failed ({_qp.get('reason', 'unknown error')}). Try again.")
+                    st.query_params.clear()
+    
+                _token = get_id_token()
+                if not _token:
+                    st.caption("Log in first to connect Gmail.")
+                else:
+                    _headers = {"Authorization": f"Bearer {_token}"}
+                    try:
+                        _status = requests.get(f"{BACKEND_URL}/api/gmail/status", headers=_headers, timeout=10).json()
+                    except Exception:
+                        _status = {"connected": False}
+    
+                    if _status.get("connected"):
+                        st.markdown("✅ **Gmail connected** — UPI/bank debit alerts are being scanned for spending insights.")
+                        gcol1, gcol2, gcol3 = st.columns(3)
+                        with gcol1:
+                            if st.button("Refresh spending data", key="gmail_sync_btn"):
+                                try:
+                                    r = requests.post(f"{BACKEND_URL}/api/gmail/sync", headers=_headers, timeout=60)
+                                    r.raise_for_status()
+                                    st.success(f"Synced — {r.json().get('new_transactions_stored', 0)} new transactions found.")
+                                except Exception as e:
+                                    st.error(f"Sync failed: {e}")
+                        with gcol2:
+                            # Ordinary refresh above only picks up NEW mail —
+                            # transactions already stored keep whatever merchant
+                            # the parser extracted at the time, even after a
+                            # parsing-logic fix. This re-parses every stored
+                            # transaction with today's logic, correcting things
+                            # like a helpline number or boilerplate phrase
+                            # ("help you") that got mistaken for a merchant
+                            # before. Slower than a normal refresh since it
+                            # re-fetches every matched email, not just new ones.
+                            if st.button("Fix past entries", key="gmail_reparse_btn", help="Re-parses all previously-synced transactions with the latest merchant-extraction logic — use this once if old summaries show odd merchant names like a phone number or 'help you'."):
+                                try:
+                                    r = requests.post(
+                                        f"{BACKEND_URL}/api/gmail/sync",
+                                        params={"force_reparse": "true"},
+                                        headers=_headers, timeout=120,
+                                    )
+                                    r.raise_for_status()
+                                    st.success(f"Re-parsed — {r.json().get('new_transactions_stored', 0)} transactions updated.")
+                                except Exception as e:
+                                    st.error(f"Re-parse failed: {e}")
+                        with gcol3:
+                            if st.button("Disconnect", key="gmail_disconnect_btn"):
+                                try:
+                                    requests.post(f"{BACKEND_URL}/api/gmail/disconnect", headers=_headers, timeout=10)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Disconnect failed: {e}")
+                    else:
+                        st.caption(
+                            "Connect your Gmail (read-only) so I can spot UPI/bank debit alerts and "
+                            "answer things like \"how did my spending go this month?\". Nothing else in "
+                            "your inbox is read."
                         )
-                    if _label_html:
-                        st.markdown(_label_html, unsafe_allow_html=True)
-                    # Opens the avatar/bubble wrapper only — the reply text itself is
-                    # rendered by a separate st.markdown() call right after (real
-                    # commonmark: bullets, bold, and tables all render properly
-                    # instead of being flattened into one escaped paragraph), and
-                    # the wrapper is closed a couple of calls further down. Same
-                    # split-open/close-across-calls pattern already used below for
-                    # the snapshot/peers/movie cards.
-                    st.markdown(f'''
-                    <div class="cfa-bubble-row" style="justify-content:flex-start;">
-                        <div class="cfa-avatar" style="background:#8fae64;color:#15120e;">AI</div>
-                        <div class="cfa-bubble" style="background:rgba(143,174,100,0.10);
-                            border:1px solid rgba(143,174,100,0.35);border-radius:14px 14px 14px 2px;
-                            color:#e8ddc7;margin-bottom:{'8px' if msg.get('audio') else '0'};">
-                    ''', unsafe_allow_html=True)
-                    st.markdown(clean_text)
-                    if msg.get("audio"):
-                        st.markdown(f'<audio controls autoplay style="width:100%;height:36px;border-radius:4px;"><source src="data:audio/mp3;base64,{msg["audio"]}" type="audio/mp3"></audio>', unsafe_allow_html=True)
-                    st.markdown('</div></div>', unsafe_allow_html=True)
-
-                    # PathSense route card — rendered when the leisure agent
-                    # successfully called get_safe_route this turn (see
-                    # backend/app/agents.py's route_meta). Uses Google's
-                    # key-less "output=embed" directions embed rather than
-                    # the Maps JavaScript API, since this app has no Maps
-                    # JS key wired in — same visual result (route line on a
-                    # real map) for a "From/To" pair, no API key required.
-                    _route = msg.get("route")
-                    if _route and _route.get("source") and _route.get("destination"):
-                        _src_q = quote(_route["source"])
-                        _dst_q = quote(_route["destination"])
-                        _embed_url = f"https://www.google.com/maps?saddr={_src_q}&daddr={_dst_q}&output=embed"
-                        components.html(f"""
-<div style="margin:6px 0 4px 44px;border:1px solid #3a4a2a;border-radius:10px;overflow:hidden;">
-    <iframe src="{_embed_url}" width="100%" height="280" style="border:0;display:block;" loading="lazy"></iframe>
-</div>
-""", height=286)
-
-                    # Stock snapshot card — rendered whenever the equity agent
-                    # successfully called get_stock_snapshot this turn (see
-                    # agents.py's route_meta capture). Real pulled numbers,
-                    # not a re-narration of whatever the model said in text.
-                    _snap = _route.get("snapshot") if _route else None
-                    if _snap:
-                        def _fmt(v, suffix="", prefix="", decimals=2):
-                            if v is None:
-                                return "—"
+                        if st.button("Connect Gmail", key="gmail_connect_btn"):
                             try:
-                                return f"{prefix}{float(v):,.{decimals}f}{suffix}"
-                            except (TypeError, ValueError):
-                                return str(v)
-
-                        _chg = _snap.get("dayChangePct")
-                        _chg_color = "#8fae64" if (_chg or 0) >= 0 else "#c4685a"
-                        _chg_str = f"{_chg:+.2f}%" if _chg is not None else "—"
-                        _ychg = _snap.get("yearChangePct")
-                        _ychg_badge = ""
-                        if _ychg is not None:
-                            _yc_color = "#8fae64" if _ychg >= 0 else "#c4685a"
-                            _yc_arrow = "↑" if _ychg >= 0 else "↓"
-                            _ychg_badge = (
-                                f'<span style="font-size:11px;font-weight:700;color:{_yc_color};'
-                                f'background:rgba(143,174,100,0.12);border-radius:20px;padding:2px 9px;margin-left:8px;">'
-                                f'{_yc_arrow} {abs(_ychg):.2f}% past year</span>'
-                            )
-                        _chart_svg = _svg_price_chart(_snap.get("priceHistory") or [])
-                        with st.container():
-                            st.markdown(f'''
-<div style="margin:6px 0 4px 44px;padding:14px 16px;border:1px solid #3a3226;border-radius:10px;background:rgba(143,174,100,0.05);">
-    <div style="font-size:13px;font-weight:800;color:#f6efdc;">{html.escape(str(_snap.get("symbol") or ""))}
-        <span style="font-weight:400;color:#a99872;">{html.escape(str(_snap.get("shortName") or ""))}</span></div>
-    <div style="font-size:22px;font-weight:800;color:#f6efdc;margin:4px 0;">
-        ₹{_fmt(_snap.get("currentPrice"))}
-        <span style="font-size:13px;font-weight:700;color:{_chg_color};margin-left:8px;">{_chg_str} today</span>
-        {_ychg_badge}
+                                r = requests.get(f"{BACKEND_URL}/api/gmail/auth-url", headers=_headers, timeout=10)
+                                r.raise_for_status()
+                                auth_url = r.json().get("auth_url")
+                                st.markdown(f'<a href="{auth_url}" target="_self">Click here to continue to Google →</a>', unsafe_allow_html=True)
+                            except Exception as e:
+                                st.error(f"Couldn't start Gmail connection: {e}")
+    
+            # Persona + voice-reply controls
+            ctrl1, ctrl2 = st.columns([2, 1.6])
+            with ctrl1:
+                persona = st.selectbox(
+                    "Voice", ["Aoede", "Kore", "Puck", "Charon", "Fenrir"],
+                    key="cfa_persona", label_visibility="collapsed"
+                )
+            with ctrl2:
+                speak_reply = st.toggle("🔊 Speak reply", value=False, key="cfa_speak_reply")
+    
+            # Auto-queue a query queued elsewhere in the app
+            if st.session_state.get("pending_cfa_query"):
+                _pending = st.session_state.pending_cfa_query
+                st.session_state.pending_cfa_query = None
+                st.session_state.voice_history.append({"role": "user", "text": _pending})
+                st.session_state.pending_prompt_text = _pending
+                st.rerun(scope="fragment")
+    
+            # ── Scrollable message history ──
+            with st.container(height=500, border=False):
+                if not st.session_state.voice_history:
+                    st.info("Ask about a stock, fund, sector, or your portfolio — the desk is standing by.")
+                
+                import datetime
+                
+                for msg in st.session_state.voice_history:
+                    is_user = (msg["role"] == "user")
+                    name = "You" if is_user else "Daily Productivity Assistant"
+                    bg_color = "#2a2d32" if is_user else "#1e1e24" # Dark theme card colors
+                    border_color = "#3a3d42" if is_user else "#2e2e34"
+                    timestamp = datetime.datetime.now().strftime("%I:%M %p") # ideally we'd store real timestamp
+                    
+                    # Use Streamlit's native markdown rendering by wrapping the text with blank lines inside the HTML.
+                    # IMPORTANT: any HTML line indented 4+ spaces (and preceded by a blank line) gets treated by
+                    # Streamlit's markdown renderer as a Markdown "indented code block", which prints the raw tags
+                    # as visible text instead of rendering them as HTML — that's what was causing stray "</div>"
+                    # text to show up in the chat. textwrap.dedent() fixes that, but it must run on the header/
+                    # footer wrapper ONLY, before the message text is spliced in — dedent looks at every line of
+                    # the final string, so if it ran on the whole f-string, a multi-line assistant reply
+                    # containing any line with no leading spaces would "poison" the common-indent calculation and
+                    # leave the surrounding <div> tags un-dedented again.
+                    _card_header = textwrap.dedent(f"""\
+                    <div style="background-color: {bg_color}; border: 1px solid {border_color}; border-radius: 8px; padding: 16px; margin-bottom: 16px; font-family: sans-serif;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid {border_color}; padding-bottom: 8px;">
+                    <div style="font-weight: 600; font-size: 13px; color: #e0e0e0;">{name}</div>
+                    <div style="font-size: 11px; color: #888888;">{timestamp}</div>
+                    </div>
+                    <div style="font-size: 14px; line-height: 1.6; color: #d0d0d0;">
+                    """)
+                    _card_footer = textwrap.dedent("""
+                    </div>
+                    </div>
+                    """)
+                    html_card = _card_header + "\n" + msg["text"] + "\n" + _card_footer
+                    st.markdown(html_card, unsafe_allow_html=True)
+                    
+                    # We still want to show the custom agent widgets below the text if it's the assistant
+                    if not is_user:
+                        _labels = (msg.get("route") or {}).get("agent_labels") or []
+                        if _labels:
+                            st.caption(f"**{html.escape(' + '.join(_labels))}**")
+                        
+                        if msg.get("audio"):
+                            st.markdown(f'<audio controls autoplay style="width:100%;height:36px;border-radius:4px;"><source src="data:audio/mp3;base64,{msg["audio"]}" type="audio/mp3"></audio>', unsafe_allow_html=True)
+                            
+                        _route = msg.get("route")
+                        if _route and _route.get("source") and _route.get("destination"):
+                            _src_q = quote(_route["source"])
+                            _dst_q = quote(_route["destination"])
+                            _embed_url = f"https://www.google.com/maps?saddr={_src_q}&daddr={_dst_q}&output=embed"
+                            components.html(f"""
+    <div style="border:1px solid #3a4a2a;border-radius:10px;overflow:hidden;margin-top:10px;">
+        <iframe src="{_embed_url}" width="100%" height="280" style="border:0;display:block;" loading="lazy"></iframe>
     </div>
-    {f'<div style="margin:6px -4px 2px -4px;">{_chart_svg}</div>' if _chart_svg else ''}
-    <div style="display:flex;flex-wrap:wrap;gap:14px;font-size:11px;color:#a99872;margin-top:8px;">
-        <div>Prev close<br><span style="color:#e8ddc7;">₹{_fmt(_snap.get("previousClose"))}</span></div>
-        <div>Day range<br><span style="color:#e8ddc7;">₹{_fmt(_snap.get("dayLow"))} – ₹{_fmt(_snap.get("dayHigh"))}</span></div>
-        <div>52-wk range<br><span style="color:#e8ddc7;">₹{_fmt(_snap.get("week52Low"))} – ₹{_fmt(_snap.get("week52High"))}</span></div>
-        <div>Mkt cap<br><span style="color:#e8ddc7;">₹{_fmt((_snap.get("marketCap") or 0)/1e7, decimals=0)} Cr</span></div>
-        <div>P/E<br><span style="color:#e8ddc7;">{_fmt(_snap.get("trailingPE"))}</span></div>
-        <div>Div yield<br><span style="color:#e8ddc7;">{_fmt(_snap.get("dividendYield"))}%</span></div>
-    </div>
-</div>
-''', unsafe_allow_html=True)
-
-                    # Peer comparison table — get_peer_comparison this turn.
-                    _peers = _route.get("peers") if _route else None
-                    if _peers and _peers.get("peers"):
-                        with st.container():
-                            st.markdown(
-                                f'<div style="margin:2px 0 2px 44px;font-size:10.5px;font-weight:700;'
-                                f'letter-spacing:0.5px;color:#a99872;text-transform:uppercase;">'
-                                f'Peers in {html.escape(str(_peers.get("sector") or ""))}</div>',
-                                unsafe_allow_html=True,
-                            )
+    """, height=286)
+    
+                        _snap = _route.get("snapshot") if _route else None
+                        if _snap:
+                            def _fmt(v, suffix="", prefix="", decimals=2):
+                                if v is None: return "—"
+                                try: return f"{prefix}{float(v):,.{decimals}f}{suffix}"
+                                except: return str(v)
+    
+                            _chg = _snap.get("dayChangePct")
+                            _chg_color = "#8fae64" if (_chg or 0) >= 0 else "#c4685a"
+                            _chg_str = f"{_chg:+.2f}%" if _chg is not None else "—"
+                            _ychg = _snap.get("yearChangePct")
+                            _ychg_badge = ""
+                            if _ychg is not None:
+                                _yc_color = "#8fae64" if _ychg >= 0 else "#c4685a"
+                                _yc_arrow = "↑" if _ychg >= 0 else "↓"
+                                _ychg_badge = f'<span style="font-size:11px;font-weight:700;color:{_yc_color};background:rgba(143,174,100,0.12);border-radius:20px;padding:2px 9px;margin-left:8px;">{_yc_arrow} {abs(_ychg):.2f}% past year</span>'
+                                
+                            st.markdown(textwrap.dedent(f'''\
+                            <div style="margin-top:10px;padding:14px 16px;border:1px solid #3a3226;border-radius:10px;background:rgba(143,174,100,0.05);">
+                                <div style="font-size:13px;font-weight:800;color:#f6efdc;">{html.escape(str(_snap.get("symbol") or ""))}
+                                    <span style="font-weight:400;color:#a99872;">{html.escape(str(_snap.get("shortName") or ""))}</span></div>
+                                <div style="font-size:22px;font-weight:800;color:#f6efdc;margin:4px 0;">
+                                    ₹{_fmt(_snap.get("currentPrice"))}
+                                    <span style="font-size:13px;font-weight:700;color:{_chg_color};margin-left:8px;">{_chg_str} today</span>
+                                    {_ychg_badge}
+                                </div>
+                                <div style="display:flex;flex-wrap:wrap;gap:14px;font-size:11px;color:#a99872;margin-top:8px;">
+                                    <div>Prev close<br><span style="color:#e8ddc7;">₹{_fmt(_snap.get("previousClose"))}</span></div>
+                                    <div>Day range<br><span style="color:#e8ddc7;">₹{_fmt(_snap.get("dayLow"))} – ₹{_fmt(_snap.get("dayHigh"))}</span></div>
+                                    <div>52-wk range<br><span style="color:#e8ddc7;">₹{_fmt(_snap.get("week52Low"))} – ₹{_fmt(_snap.get("week52High"))}</span></div>
+                                    <div>Mkt cap<br><span style="color:#e8ddc7;">₹{_fmt((_snap.get("marketCap") or 0)/1e7, decimals=0)} Cr</span></div>
+                                    <div>P/E<br><span style="color:#e8ddc7;">{_fmt(_snap.get("trailingPE"))}</span></div>
+                                    <div>Div yield<br><span style="color:#e8ddc7;">{_fmt(_snap.get("dividendYield"))}%</span></div>
+                                </div>
+                            </div>
+                            '''), unsafe_allow_html=True)
+                            # Real interactive TradingView chart (replaces the old flat SVG line — see
+                            # _tradingview_chart_html's docstring) — needs its own components.html call
+                            # since it's a <script>-bearing widget, not plain markup the chat card above can inline.
+                            if _snap.get("symbol"):
+                                components.html(_tradingview_chart_html(_snap["symbol"]), height=430)
+    
+                        _peers = _route.get("peers") if _route else None
+                        if _peers and _peers.get("peers"):
+                            st.caption(f'**PEERS IN {html.escape(str(_peers.get("sector") or "")).upper()}**')
                             _rows = [_peers["target"]] + _peers["peers"]
                             st.dataframe(
                                 [
@@ -1250,48 +1170,150 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                                 use_container_width=True,
                                 hide_index=True,
                             )
-
-                    # Movie info card — rendered when cinema_agent called
-                    # get_movie_info this turn (real TMDB data, not the
-                    # model's memory — see agents.py's route_meta capture).
-                    _movie = _route.get("movie_info") if _route else None
-                    if _movie:
-                        with st.container():
-                            _poster_html = (
-                                f'<img src="{_movie.get("poster_url")}" style="width:64px;border-radius:6px;'
-                                f'margin-right:12px;" />' if _movie.get("poster_url") else ""
-                            )
+    
+                        _movie = _route.get("movie_info") if _route else None
+                        if _movie:
+                            _poster_html = f'<img src="{_movie.get("poster_url")}" style="width:64px;border-radius:6px;margin-right:12px;" />' if _movie.get("poster_url") else ""
                             _cast_str = ", ".join(_movie.get("cast") or []) or "—"
-                            st.markdown(f'''
-<div style="margin:6px 0 4px 44px;padding:12px 14px;border:1px solid #3a3226;border-radius:10px;
-    background:rgba(143,174,100,0.05);display:flex;align-items:flex-start;">
-    {_poster_html}
-    <div>
-        <div style="font-size:14px;font-weight:800;color:#f6efdc;">{html.escape(str(_movie.get("title") or ""))}
-            <span style="font-weight:400;color:#a99872;font-size:11px;">{html.escape(str(_movie.get("release_date") or ""))}</span></div>
-        <div style="font-size:11px;color:#a99872;margin-top:2px;">
-            ⭐ {_movie.get("vote_average", "—")}/10 · {html.escape(", ".join(_movie.get("genres") or []))}
-            {f' · {_movie.get("runtime_minutes")} min' if _movie.get("runtime_minutes") else ''}
-        </div>
-        <div style="font-size:11px;color:#a99872;margin-top:4px;">Director: {html.escape(str(_movie.get("director") or "—"))}</div>
-        <div style="font-size:11px;color:#a99872;">Cast: {html.escape(_cast_str)}</div>
-    </div>
-</div>
-''', unsafe_allow_html=True)
+                            st.markdown(textwrap.dedent(f'''\
+                            <div style="margin-top:10px;padding:12px 14px;border:1px solid #3a3226;border-radius:10px;background:rgba(143,174,100,0.05);display:flex;align-items:flex-start;">
+                                {_poster_html}
+                                <div>
+                                    <div style="font-size:14px;font-weight:800;color:#f6efdc;">{html.escape(str(_movie.get("title") or ""))}
+                                        <span style="font-weight:400;color:#a99872;font-size:11px;">{html.escape(str(_movie.get("release_date") or ""))}</span></div>
+                                    <div style="font-size:11px;color:#a99872;margin-top:2px;">
+                                        ⭐ {_movie.get("vote_average", "—")}/10 · {html.escape(", ".join(_movie.get("genres") or []))}
+                                        {f' · {_movie.get("runtime_minutes")} min' if _movie.get("runtime_minutes") else ''}
+                                    </div>
+                                    <div style="font-size:11px;color:#a99872;margin-top:4px;">Director: {html.escape(str(_movie.get("director") or "—"))}</div>
+                                    <div style="font-size:11px;color:#a99872;">Cast: {html.escape(_cast_str)}</div>
+                                </div>
+                            </div>
+                            '''), unsafe_allow_html=True)
 
-        # ── Text input ──
-        user_query = st.chat_input("Ask your Daily Productivity Assistant...", key="bot_chat_input")
-        if user_query:
-            if call_assistant(prompt_text=user_query):
-                st.rerun()
+                        _breakout = _route.get("breakout_candidates") if _route else None
+                        if _breakout and _breakout.get("candidates"):
+                            _rows_html = ""
+                            for _c in _breakout["candidates"]:
+                                _dchg = _c.get("day_change_pct")
+                                _dchg_color = "#8fae64" if (_dchg or 0) >= 0 else "#c4685a"
+                                _dchg_str = f"{_dchg:+.2f}% today" if _dchg is not None else "day change n/a"
+                                _rows_html += (
+                                    '<div style="display:flex;justify-content:space-between;align-items:center;'
+                                    'padding:8px 0;border-top:1px solid #3a3226;">'
+                                    f'<div><span style="font-weight:700;color:#f6efdc;">{html.escape(str(_c.get("symbol") or ""))}</span>'
+                                    f' <span style="color:#a99872;font-size:11px;">{html.escape(str(_c.get("name") or ""))}</span></div>'
+                                    f'<div style="text-align:right;font-size:12px;">'
+                                    f'₹{_c.get("price")} <span style="color:{_dchg_color};">({_dchg_str})</span><br>'
+                                    f'<span style="color:#a99872;">5d {_c.get("five_day_change_pct"):+.2f}% · vol +{_c.get("volume_growth_pct"):.0f}%</span>'
+                                    '</div></div>'
+                                )
+                            st.markdown(textwrap.dedent(f'''\
+                            <div style="margin-top:10px;padding:12px 14px;border:1px solid #3a3226;border-radius:10px;background:rgba(143,174,100,0.05);">
+                                <div style="font-size:12px;font-weight:800;color:#f6efdc;letter-spacing:0.03em;">📈 BREAKOUT SCREEN</div>
+                                <div style="font-size:10.5px;color:#8a7d5f;margin-top:2px;">Momentum + volume heuristic from cached data — a shortlist worth a look, not a guarantee.</div>
+                                {_rows_html}
+                            </div>
+                            '''), unsafe_allow_html=True)
 
-        # ── Voice input (mic) ──
-        mic_audio = st.audio_input("Or ask by voice", key="cfa_mic_input")
-        if mic_audio is not None:
-            audio_id = f"{mic_audio.name}-{mic_audio.size}" if hasattr(mic_audio, "size") else str(len(mic_audio.getvalue()))
-            if audio_id != st.session_state.last_audio_id:
-                st.session_state.last_audio_id = audio_id
-                audio_bytes = mic_audio.getvalue()
-                audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-                if call_assistant(audio_b64=audio_b64):
-                    st.rerun()
+                        _trade = _route.get("trade_result") if _route else None
+                        if _trade:
+                            if _trade.get("ok"):
+                                st.markdown(textwrap.dedent(f'''\
+                                <div style="margin-top:10px;padding:12px 14px;border:1px solid #3a4a2a;border-radius:10px;background:rgba(143,174,100,0.08);">
+                                    <div style="font-size:12px;font-weight:800;color:#8fae64;">✅ ORDER PLACED — {html.escape(str(_trade.get("status") or ""))}</div>
+                                    <div style="font-size:11px;color:#c9bd9e;margin-top:4px;">Filled {_trade.get("filled_quantity", 0)} @ ₹{_trade.get("average_price") or "—"} · order id {html.escape(str(_trade.get("broker_order_id") or "—"))}</div>
+                                </div>
+                                '''), unsafe_allow_html=True)
+                            elif _trade.get("insufficient_funds"):
+                                st.markdown(textwrap.dedent(f'''\
+                                <div style="margin-top:10px;padding:12px 14px;border:1px solid #5a2a2a;border-radius:10px;background:rgba(196,104,90,0.08);">
+                                    <div style="font-size:12px;font-weight:800;color:#c4685a;">⚠️ ORDER NOT PLACED — INSUFFICIENT BALANCE</div>
+                                    <div style="font-size:11px;color:#c9bd9e;margin-top:4px;">Needs ~₹{_trade.get("required", 0):,.2f} · wallet has ₹{_trade.get("available", 0):,.2f} available.</div>
+                                </div>
+                                '''), unsafe_allow_html=True)
+                            else:
+                                st.markdown(textwrap.dedent(f'''\
+                                <div style="margin-top:10px;padding:12px 14px;border:1px solid #5a2a2a;border-radius:10px;background:rgba(196,104,90,0.08);">
+                                    <div style="font-size:12px;font-weight:800;color:#c4685a;">⚠️ ORDER FAILED</div>
+                                    <div style="font-size:11px;color:#c9bd9e;margin-top:4px;">{html.escape(str(_trade.get("error") or "Unknown error"))}</div>
+                                </div>
+                                '''), unsafe_allow_html=True)
+    
+                # Optimistic rendering and waiting
+                if st.session_state.get("pending_prompt_text") or st.session_state.get("pending_audio_b64"):
+                    with st.chat_message("cfa", avatar="🤖"):
+                        with st.spinner("Daily Productivity agent is thinking..."):
+                            pt = st.session_state.get("pending_prompt_text", "")
+                            ab = st.session_state.get("pending_audio_b64")
+                            
+                            mode_val = "VOICE" if speak_reply else "TEXT"
+                            # All messages except the last one (which is the pending query we just appended)
+                            recent_history = [
+                                {"role": "assistant" if m["role"] == "cfa" else "user", "text": m["text"]}
+                                for m in st.session_state.voice_history[:-1][-6:]
+                            ]
+                            try:
+                                _user_identifier = st.session_state.get("fb_email", "anon")
+                                
+                                if "chat_session_id" not in st.session_state:
+                                    import uuid
+                                    st.session_state.chat_session_id = uuid.uuid4().hex
+                                    
+                                _unique_session = f"{_user_identifier}_{st.session_state.chat_session_id}"
+                                
+                                resp = requests.post(f"{BACKEND_URL}/api/market/voice", json={
+                                    "prompt": pt,
+                                    "audio_in_base64": ab or "",
+                                    "persona": persona,
+                                    "session_id": _unique_session,
+                                    "mode": mode_val,
+                                    "location": st.session_state.user_location,
+                                    "history": recent_history,
+                                    "id_token": get_id_token(),
+                                }, timeout=60)
+                                
+                                if resp.status_code == 200:
+                                    data = resp.json()
+                                    # Update transcript if it was voice
+                                    if ab and data.get("transcript"):
+                                        st.session_state.voice_history[-1]["text"] = data.get("transcript")
+                                    
+                                    st.session_state.voice_history.append({
+                                        "role": "cfa",
+                                        "text": data.get("text", "No response received."),
+                                        "audio": data.get("audio_base64"),
+                                        "route": data.get("route"),
+                                    })
+                                else:
+                                    try:
+                                        err_text = resp.json().get("detail", resp.text)
+                                    except Exception:
+                                        err_text = resp.text
+                                    st.session_state.voice_history.append({"role": "cfa", "text": f"**Error {resp.status_code}**: {err_text}"})
+                            except Exception as e:
+                                st.session_state.voice_history.append({"role": "cfa", "text": f"**Connection failed**: {e}"})
+                            finally:
+                                st.session_state.pending_prompt_text = None
+                                st.session_state.pending_audio_b64 = None
+                                st.rerun(scope="fragment")
+    
+            # ── Text input ──
+            user_query = st.chat_input("Ask your Daily Productivity Assistant...", key="bot_chat_input")
+            if user_query:
+                st.session_state.voice_history.append({"role": "user", "text": user_query})
+                st.session_state.pending_prompt_text = user_query
+                st.rerun(scope="fragment")
+    
+            # ── Voice input (mic) ──
+            mic_audio = st.audio_input("Or ask by voice", key="cfa_mic_input")
+            if mic_audio is not None:
+                audio_id = f"{mic_audio.name}-{mic_audio.size}" if hasattr(mic_audio, "size") else str(len(mic_audio.getvalue()))
+                if audio_id != st.session_state.get("last_audio_id"):
+                    st.session_state.last_audio_id = audio_id
+                    audio_bytes = mic_audio.getvalue()
+                    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                    st.session_state.voice_history.append({"role": "user", "text": "(voice message)"})
+                    st.session_state.pending_audio_b64 = audio_b64
+                    st.rerun(scope="fragment")
+    render_cfa_panel()

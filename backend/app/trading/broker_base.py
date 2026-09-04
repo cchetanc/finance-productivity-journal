@@ -65,8 +65,38 @@ class Quote:
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
 
+@dataclass
+class Funds:
+    """Wallet / margin snapshot, used both for the Trade Terminal's balance
+    display and for the pre-trade 'do we actually have the cash for this'
+    check in ExecutionEngine (see engine.py)."""
+    available_cash: float             # what's actually free to trade with right now
+    net: Optional[float] = None       # broker's total net (cash + collateral - utilised), if it reports one
+    utilised_debits: Optional[float] = None
+    collateral: Optional[float] = None
+    raw: dict = field(default_factory=dict)
+
+
 class BrokerError(Exception):
     """Raised for any broker-side failure (auth, rejection, network)."""
+
+
+class InsufficientFundsError(BrokerError):
+    """Raised when a trade (manual or algo) would need more cash than the
+    wallet currently has available. Kept as its own exception (rather than
+    a generic BrokerError) so callers — the agent's place_trade_order tool
+    in particular — can distinguish 'not enough money' from every other
+    broker failure and say so plainly instead of a generic error."""
+
+    def __init__(self, required: float, available: float, message: str | None = None):
+        self.required = required
+        self.available = available
+        super().__init__(
+            message or (
+                f"Insufficient balance: this order needs ~₹{required:,.2f} but only "
+                f"₹{available:,.2f} is available in the wallet."
+            )
+        )
 
 
 class BrokerClient(ABC):
@@ -92,4 +122,8 @@ class BrokerClient(ABC):
 
     @abstractmethod
     async def get_positions(self) -> list:
+        ...
+
+    @abstractmethod
+    async def get_funds(self) -> Funds:
         ...

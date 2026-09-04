@@ -406,6 +406,99 @@ def get_fund_data(fund_id: str) -> dict:
     }
 
 
+def scan_breakout_candidates(limit: int = 5) -> dict:
+    """'Quant analyst' style breakout screen — real NSE/BSE candidates
+    currently showing 5-day upward momentum confirmed by unusually high
+    trading volume, sourced from the cached equity screener (see
+    screener_data.get_breakout_candidates). This is a transparent
+    momentum+volume heuristic, NOT chart-pattern/technical breakout
+    detection and NOT a guarantee — always present it to the user as a
+    screened shortlist worth a closer look, with the actual numbers, not as
+    a certainty. Takes no required arguments."""
+    from .screener_data import get_breakout_candidates
+    try:
+        return get_breakout_candidates(limit=limit)
+    except Exception as e:
+        log.warning("scan_breakout_candidates failed: %s", e)
+        return {"error": f"Could not read the screener cache: {e}", "candidates": []}
+
+
+def place_trade_order(symbol: str, exchange: str, side: str, quantity: int,
+                       order_type: str = "MARKET", limit_price: float = None,
+                       mode: str = "PAPER") -> dict:
+    """Places a real order through the signed-in user's own trading account —
+    PAPER (simulated, default) or LIVE (real money via their connected Angel
+    One account). uid comes ONLY from the server-verified request context
+    (see set_current_uid above), never from the model, exactly like
+    get_upi_spending_summary — a model asking "whose account" isn't a
+    question this tool accepts.
+
+    ONLY call this after the user has explicitly confirmed a SPECIFIC trade
+    (symbol, side, and quantity) that you already named to them in your
+    immediately preceding message — a generic "sure"/"okay" with no clear
+    antecedent is NOT confirmation, and neither is enthusiasm about a
+    breakout screen in general. Never call this speculatively "to see what
+    happens." Default to mode="PAPER" unless the user has explicitly used
+    the words "live"/"real money"/"real order" for THIS trade — do not
+    infer LIVE mode from general enthusiasm or from a mode used earlier in
+    the conversation.
+
+    If the wallet doesn't have enough balance for a BUY, this returns
+    insufficient_funds=true rather than an opaque error — tell the user
+    plainly that the order was NOT placed because of insufficient balance,
+    state the amount required vs. available, and do not retry with a
+    smaller size unless the user asks you to."""
+    uid = _current_uid.get()
+    if not uid:
+        return {"ok": False, "error": "No signed-in user for this session, so there's no account to trade from."}
+
+    side_u = (side or "").upper()
+    if side_u not in ("BUY", "SELL"):
+        return {"ok": False, "error": f"side must be BUY or SELL, got '{side}'."}
+    order_type_u = (order_type or "MARKET").upper()
+    if order_type_u not in ("MARKET", "LIMIT"):
+        return {"ok": False, "error": f"order_type must be MARKET or LIMIT, got '{order_type}'."}
+    mode_u = (mode or "PAPER").upper()
+    if mode_u not in ("PAPER", "LIVE"):
+        return {"ok": False, "error": f"mode must be PAPER or LIVE, got '{mode}'."}
+    if not quantity or quantity <= 0:
+        return {"ok": False, "error": "quantity must be a positive number of shares."}
+
+    from .trading.broker_base import OrderSide, OrderType
+    from .trading.service import place_simple_order
+
+    async def _run():
+        return await place_simple_order(
+            uid, symbol=symbol, exchange=exchange or "NSE",
+            side=OrderSide(side_u), quantity=int(quantity),
+            order_type=OrderType(order_type_u), limit_price=limit_price,
+            mode=mode_u,
+        )
+
+    try:
+        return _run_coro_blocking(_run())
+    except Exception as e:
+        log.error("place_trade_order failed for uid=%s symbol=%s: %s", uid, symbol, e)
+        return {"ok": False, "error": str(e)}
+
+
+def _run_coro_blocking(coro):
+    """Runs an async coroutine to completion from inside a synchronous tool
+    function — needed because place_trade_order has to await the (async)
+    trading engine/broker calls, but TOOL_IMPLS entries are called
+    synchronously from inside agents.py's already-running asyncio event
+    loop. asyncio.run() refuses to start a second event loop on a thread
+    that already has one running, so this spins the coroutine up on its own
+    thread with its own fresh loop instead, and blocks for the result —
+    consistent with the rest of this module already making blocking
+    network calls (requests.get, yfinance) directly inside tool functions."""
+    import asyncio
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(asyncio.run, coro)
+        return future.result()
+
+
 def get_market_movers() -> dict:
     """Trader-facing 'what's worth watching right now' shortlist — high
     trading-volume growth and the biggest single-session price moves,
@@ -849,6 +942,53 @@ TOOL_SCHEMAS = {
                 "required": ["title"]
             }
         }
+    },
+    "scan_breakout_candidates": {
+        "type": "function",
+        "function": {
+            "name": "scan_breakout_candidates",
+            "description": (
+                "Screens the cached NSE/BSE equity data for stocks showing 5-day upward price "
+                "momentum confirmed by unusually high trading volume — a quantitative breakout-style "
+                "shortlist. Use when the user asks for stocks 'about to break out', 'momentum plays', "
+                "or wants you to 'act like a quant analyst and recommend some trades'. This is a "
+                "screened heuristic, not certainty — present the real numbers returned, not a guarantee."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "number", "description": "Max number of candidates to return (default 5)"}
+                }
+            }
+        }
+    },
+    "place_trade_order": {
+        "type": "function",
+        "function": {
+            "name": "place_trade_order",
+            "description": (
+                "Places a real order in the signed-in user's own trading account — PAPER (simulated, "
+                "default) or LIVE (real money, via their connected Angel One account). ONLY call this "
+                "after the user has explicitly confirmed a SPECIFIC trade (symbol, side, quantity) you "
+                "already proposed in your immediately preceding message — never speculatively, and never "
+                "infer LIVE mode unless the user explicitly said 'live'/'real money' for this trade. If "
+                "the order can't be placed for insufficient balance, this returns insufficient_funds=true "
+                "with the amounts — relay that plainly to the user rather than retrying automatically."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Trading symbol, e.g. RELIANCE, TCS"},
+                    "exchange": {"type": "string", "description": "'NSE' or 'BSE' (default NSE)"},
+                    "side": {"type": "string", "description": "'BUY' or 'SELL'"},
+                    "quantity": {"type": "number", "description": "Number of shares"},
+                    "order_type": {"type": "string", "description": "'MARKET' (default) or 'LIMIT'"},
+                    "limit_price": {"type": "number", "description": "Required if order_type is LIMIT"},
+                    "mode": {"type": "string", "description": "'PAPER' (default, simulated) or 'LIVE' (real money) — only use LIVE if the user explicitly said so for this trade"}
+                },
+                "required": ["symbol", "side", "quantity"]
+            }
+        }
     }
 }
 
@@ -896,4 +1036,11 @@ TOOL_IMPLS = {
     "get_hotel_availability": _get_hotel_availability_wrapper,
     "get_upi_spending_summary": lambda args: get_upi_spending_summary(args.get("month"), args.get("force_reparse", False)),
     "get_movie_info": lambda args: get_movie_info(args.get("title", ""), args.get("year")),
+    "scan_breakout_candidates": lambda args: scan_breakout_candidates(args.get("limit", 5)),
+    "place_trade_order": lambda args: place_trade_order(
+        symbol=args.get("symbol", ""), exchange=args.get("exchange", "NSE"),
+        side=args.get("side", ""), quantity=args.get("quantity", 0),
+        order_type=args.get("order_type", "MARKET"), limit_price=args.get("limit_price"),
+        mode=args.get("mode", "PAPER"),
+    ),
 }

@@ -13,6 +13,7 @@ of the same page rather than a bolted-on widget.
 """
 import datetime
 import html
+import textwrap
 
 import requests
 import streamlit as st
@@ -20,11 +21,73 @@ import streamlit as st
 from auth_helper import auth_headers, get_id_token, login_widget
 
 ALGO_TYPES = ["ICEBERG", "TWAP", "VWAP", "MOMENTUM_SNIPER"]
+
+# Each strategy gets a one-line "what it is" (kept for the inline caption under the
+# selector) plus a fuller "what" / "when to use" pair (shown in the reference panel
+# below, and usable anywhere a longer explanation is needed).
 ALGO_DESCRIPTIONS = {
     "ICEBERG": "Splits the order into small repeated clips so only a fraction is ever visible on the book.",
     "TWAP": "Equal-sized slices spread evenly across a time window.",
     "VWAP": "Slices weighted to follow the market's typical intraday volume curve.",
     "MOMENTUM_SNIPER": "Waits for price to cross a breakout trigger, then fires the full size fast with a stop-loss.",
+}
+
+ALGO_DETAILS = {
+    "ICEBERG": {
+        "label": "Iceberg",
+        "what": (
+            "Only a small \"tip\" of the total order — one clip at a time — is ever shown on the "
+            "order book. As each visible clip fills, the next one is released, so the market never "
+            "sees your full size at once (like an iceberg, where most of it sits below the surface)."
+        ),
+        "when": (
+            "Use it for a large order in a stock with modest liquidity, where revealing the full "
+            "quantity up front would tip off other traders and move the price against you before "
+            "you're filled. Not needed for small orders or already-deep, highly liquid names."
+        ),
+    },
+    "TWAP": {
+        "label": "TWAP — Time-Weighted Average Price",
+        "what": (
+            "Breaks the order into equal-sized slices and fires them at even intervals across a "
+            "fixed time window, regardless of how much volume is trading at any given moment. "
+            "The goal is to average in/out steadily over that window."
+        ),
+        "when": (
+            "Use it when you want a simple, predictable execution schedule and volume is fairly "
+            "steady through the day (or you specifically don't want to chase volume spikes). Less "
+            "ideal in a stock with a very lopsided volume curve, since VWAP will track the market "
+            "better in that case."
+        ),
+    },
+    "VWAP": {
+        "label": "VWAP — Volume-Weighted Average Price",
+        "what": (
+            "Slices the order to follow the stock's typical intraday volume curve — bigger clips "
+            "during high-volume periods (like the open and close), smaller clips during the quiet "
+            "midday lull — so your execution blends in with the market's natural rhythm."
+        ),
+        "when": (
+            "Use it for larger orders where the goal is to get filled close to the day's true "
+            "volume-weighted average price with minimal market impact — the standard choice for "
+            "institutional-style execution. Preferred over TWAP whenever the stock's volume is "
+            "concentrated around the open/close rather than flat through the day."
+        ),
+    },
+    "MOMENTUM_SNIPER": {
+        "label": "Momentum Sniper",
+        "what": (
+            "Sits and waits until the price crosses a breakout trigger you set, then immediately "
+            "fires the entire order at once (not sliced) along with an attached stop-loss, rather "
+            "than executing gradually like the other three strategies."
+        ),
+        "when": (
+            "Use it for a breakout/momentum trade where you want to enter fast the instant a level "
+            "is crossed and speed matters more than minimizing market impact. Not a fit for large "
+            "orders in illiquid names, where firing the full size at once can cause slippage — "
+            "Iceberg or VWAP are the safer choice there."
+        ),
+    },
 }
 
 _STYLE = """
@@ -118,34 +181,132 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
     st.caption("Angel One")
 
     @st.cache_data(ttl=20)
-    def fetch_broker_status():
+    def fetch_broker_config():
         try:
-            r = requests.get(f"{backend_url}/api/trading/broker/status", timeout=15)
-            return r.json() if r.status_code == 200 else None
+            r = requests.get(f"{backend_url}/api/trading/config/angel-one", headers=auth_headers(), timeout=15)
+            return r.json().get("configured", False) if r.status_code == 200 else False
         except Exception:
-            return None
+            return False
 
-    status = fetch_broker_status()
-    if status and status.get("secret_manager_reachable"):
-        st.caption("🟢 Angel One live credentials ready.")
-    elif status:
-        st.caption(f"🟡 Angel One live credentials not reachable yet — LIVE orders will fail. ({status.get('detail')})")
-    else:
-        st.caption("⚪ Couldn't reach broker status right now — paper trading still works.")
+    is_configured = fetch_broker_config()
+
+    if not is_configured:
+        st.warning("⚠️ Trade Terminal requires Angel One configuration.")
+        st.info("The trade terminal connects securely to your Angel One account. Please provide your API credentials below. These are encrypted and stored in your profile.")
+        with st.form("angel_one_config_form"):
+            api_key = st.text_input("API Key (from SmartAPI)", type="password")
+            client_code = st.text_input("Client ID")
+            pin = st.text_input("Secret PIN", type="password")
+            totp_secret = st.text_input("TOTP Secret", type="password")
+            if st.form_submit_button("Save Credentials"):
+                if not all([api_key, client_code, pin, totp_secret]):
+                    st.error("All fields are required.")
+                else:
+                    try:
+                        r = requests.post(
+                            f"{backend_url}/api/trading/config/angel-one",
+                            headers=auth_headers(),
+                            json={
+                                "api_key": api_key.strip(),
+                                "client_code": client_code.strip(),
+                                "pin": pin.strip(),
+                                "totp_secret": totp_secret.strip()
+                            },
+                            timeout=15
+                        )
+                        if r.status_code == 200:
+                            st.success("Credentials saved securely.")
+                            fetch_broker_config.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to save credentials: {r.text}")
+                    except Exception as e:
+                        st.error(f"Error connecting to backend: {e}")
+        return
 
     live_toggle = st.checkbox("⚠️ Go LIVE — place real orders through Angel One (unchecked = paper trade)", value=False, key="tt_live_toggle")
     mode = "LIVE" if live_toggle else "PAPER"
     if live_toggle:
         st.warning("LIVE mode places real orders with real money through your Angel One account.")
 
+    # ── Wallet balance ──────────────────────────────────────────────────
+    # Available cash for the CURRENT mode — the paper simulator's virtual
+    # balance, or (mode=LIVE) the real Angel One account's available margin,
+    # read live via SmartAPI's rmsLimit(). Short TTL (not zero) so switching
+    # between PAPER/LIVE or refreshing after a fill shows an up-to-date
+    # number without hammering the broker on every rerun.
+    @st.cache_data(ttl=15)
+    def fetch_funds(_mode: str):
+        try:
+            r = requests.get(f"{backend_url}/api/trading/funds", params={"mode": _mode},
+                              headers=auth_headers(), timeout=15)
+            return r.json() if r.status_code == 200 else {"ok": False, "error": r.text}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    wc1, wc2 = st.columns([5, 1])
+    with wc1:
+        _funds = fetch_funds(mode)
+        if _funds.get("ok"):
+            _net_html = (
+                f' <span style="color:#a99872;font-size:11.5px;">(net ₹{_funds["net"]:,.2f})</span>'
+                if _funds.get("net") is not None else ""
+            )
+            st.markdown(
+                f'<div style="padding:10px 14px;border:1px solid #332b1f;border-radius:8px;'
+                f'background:#1a1610;font-size:13px;color:#e8ddc7;">'
+                f'💰 <span style="color:#a99872;">{html.escape(_funds.get("broker") or mode)} balance:</span> '
+                f'<span style="font-weight:800;color:#d3a94a;">₹{_funds.get("available_cash", 0):,.2f}</span> available'
+                f'{_net_html}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.warning(f"⚠️ Couldn't fetch {mode} wallet balance: {_funds.get('error', 'unknown error')}")
+    with wc2:
+        if st.button("↺", key="tt_refresh_funds", help="Refresh balance"):
+            fetch_funds.clear()
+            st.rerun()
+
     with st.container(border=True):
         row = st.columns([2.6, 1, 1.1, 1, 1])
 
+        from st_keyup import st_keyup
+        
+        if "tt_search_version" not in st.session_state:
+            st.session_state["tt_search_version"] = 0
+            
         with row[0]:
-            search_query = st.text_input(
-                "Symbol", key="tt_search_box", label_visibility="collapsed",
-                placeholder="Search e.g. RELIANCE",
+            search_query = st_keyup(
+                "Symbol", value=st.session_state.get("tt_search_value", ""), 
+                key=f"tt_search_box_{st.session_state['tt_search_version']}", 
+                label_visibility="collapsed", debounce=300, placeholder="Search e.g. RELIANCE"
             )
+            
+        if search_query and search_query != st.session_state.get("tt_last_picked"):
+            # Import dynamically to avoid circular import if any
+            from ui_helpers import predictive_search
+            _picked = predictive_search(backend_url, "equity", search_query, key_prefix="tt")
+            if _picked:
+                st.session_state["tt_search_value"] = _picked[0]
+                st.session_state["tt_last_picked"] = _picked[0]
+                
+                # Try to parse symbol and exchange from sub
+                sym = _picked[0]
+                exch = "NSE"
+                if len(_picked) > 1 and "·" in _picked[1]:
+                    parts = _picked[1].split("·")
+                    if len(parts) > 1:
+                        exch = parts[1].strip()
+                        
+                trading_symbol = f"{sym}-EQ" if exch == "NSE" else sym
+                st.session_state["tt_symbol"] = trading_symbol
+                st.session_state["tt_symbol_label"] = f"{sym} · {exch}"
+                st.session_state["tt_exchange"] = exch
+                
+                st.session_state["tt_search_version"] += 1
+                st.rerun()
+
         with row[1]:
             exchange = st.selectbox(
                 "Exchange", ["NSE", "BSE"], label_visibility="collapsed",
@@ -153,43 +314,12 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
                 key="tt_exchange_select",
             )
             st.session_state["tt_exchange"] = exchange
+            
         with row[2]:
-            qty = st.number_input("Shares", min_value=1, value=10, step=1, label_visibility="collapsed", key="tt_qty")
-
-        @st.cache_data(ttl=30)
-        def search_symbols(q: str):
-            try:
-                r = requests.get(
-                    f"{backend_url}/api/screener/stocks",
-                    params={"search": q, "page_size": 6}, timeout=10,
-                )
-                if r.status_code == 200:
-                    return r.json().get("results", [])
-            except Exception:
-                pass
-            return []
-
-        query = (search_query or "").strip()
-        is_fresh_search = query and query.upper() != st.session_state["tt_symbol"].split("-")[0]
-        if is_fresh_search and len(query) >= 1:
-            suggestions = search_symbols(query)
-            if suggestions:
-                with st.container(border=True):
-                    for s in suggestions:
-                        sym = s.get("symbol", "")
-                        exch = (s.get("exchange") or "NSE").upper()
-                        name = s.get("name", "")
-                        sector = s.get("sector") or "Equity"
-                        c1, c2, c3 = st.columns([1.2, 3, 1])
-                        c1.markdown(f"**{html.escape(sym)}**")
-                        c2.caption(f"{html.escape(name)} · {html.escape(sector)}")
-                        if c3.button("Select", key=f"sel_{sym}_{exch}"):
-                            trading_symbol = f"{sym}-EQ" if exch == "NSE" else sym
-                            st.session_state["tt_symbol"] = trading_symbol
-                            st.session_state["tt_symbol_label"] = f"{sym} · {name}"
-                            st.session_state["tt_exchange"] = exch
-                            st.session_state["tt_search_box"] = sym
-                            st.rerun()
+            qty_val = st.number_input("Shares", min_value=1, value=10, step=1, label_visibility="collapsed", key="tt_qty_input")
+        
+        with row[3]:
+            amt_val = st.number_input("Amount (₹)", min_value=0.0, value=0.0, step=1000.0, label_visibility="collapsed", key="tt_amt_input", help="If > 0, overrides Shares by calculating quantity from live price")
 
         st.caption(f"Selected: **{st.session_state['tt_symbol']}** ({st.session_state['tt_exchange']}) — {st.session_state['tt_symbol_label']}")
 
@@ -221,7 +351,13 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
                 chg_str = f"{chg}%" if chg is not None else "—"
                 chg_color = "#8fae64" if chg and chg >= 0 else "#c16b57"
                 
-                html_block = f"""
+                # textwrap.dedent() strips the leading indentation this triple-quoted string picks up from
+                # Python's own code formatting. Without it, Streamlit's markdown renderer treats the indented
+                # lines as a Markdown "indented code block" and prints the raw <div> tags as visible text
+                # instead of rendering them as HTML. (Safe to dedent the whole f-string here, unlike the chat
+                # card in app.py, because every interpolated value above — price, pe_str, mcap_str, etc. — is
+                # a single-line value, so it can never introduce a stray zero-indent line.)
+                html_block = textwrap.dedent(f"""\
                 <div style="display:flex;gap:20px;font-size:12px;color:#a99872;flex-wrap:wrap;">
                     <div>Price: <span style="color:#e8ddc7;font-weight:600;">₹{price}</span> <span style="color:{chg_color};font-size:11px;">({chg_str})</span></div>
                     <div>P/E: <span style="color:#e8ddc7;font-weight:600;">{pe_str}</span></div>
@@ -229,11 +365,29 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
                     <div>52w High: <span style="color:#e8ddc7;font-weight:600;">₹{snapshot.get('week52High') or '—'}</span></div>
                     <div>52w Low: <span style="color:#e8ddc7;font-weight:600;">₹{snapshot.get('week52Low') or '—'}</span></div>
                 </div>
-                """
+                """)
                 st.markdown(html_block, unsafe_allow_html=True)
 
         st.write("")
+        
+        calculated_qty = int(qty_val)
+        if amt_val > 0 and isinstance(price, (int, float)) and price > 0:
+            calculated_qty = int(amt_val // float(price))
+            if calculated_qty < 1: calculated_qty = 1
+            st.info(f"Amount ₹{amt_val} implies {calculated_qty} shares at live price ₹{price}.")
+            
         auto = st.checkbox("Auto — use an execution algorithm instead of a plain limit order", key="tt_auto")
+
+        # Reference panel for what each strategy is and when to use it — kept visible regardless of
+        # whether "Auto" is ticked, since someone deciding whether to turn Auto on at all needs this too.
+        with st.expander("ℹ️ What are Iceberg / TWAP / VWAP / Momentum Sniper — and when to use each", expanded=False):
+            for _algo in ALGO_TYPES:
+                _d = ALGO_DETAILS[_algo]
+                st.markdown(f"**{_d['label']}**")
+                st.markdown(f"- What it is: {_d['what']}")
+                st.markdown(f"- When to use it: {_d['when']}")
+                if _algo != ALGO_TYPES[-1]:
+                    st.markdown("---")
 
         algo_type = None
         algo_params = {}
@@ -241,10 +395,24 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
 
         if auto:
             algo_type = st.selectbox("Strategy", ALGO_TYPES, key="tt_algo")
-            st.caption(ALGO_DESCRIPTIONS[algo_type])
+
+            _detail = ALGO_DETAILS[algo_type]
+            st.markdown(
+                textwrap.dedent(f"""\
+                <div style="background:#1a1610;border:1px solid #332b1f;border-left:3px solid #d3a94a;
+                            border-radius:6px;padding:10px 14px;margin:4px 0 12px 0;font-size:12.5px;
+                            line-height:1.55;color:#c9bd9e;">
+                    <div style="font-weight:700;color:#e8ddc7;margin-bottom:4px;">{html.escape(_detail['label'])}</div>
+                    <div><span style="color:#a99872;font-weight:600;">What it is: </span>{html.escape(_detail['what'])}</div>
+                    <div style="margin-top:4px;"><span style="color:#a99872;font-weight:600;">When to use it: </span>{html.escape(_detail['when'])}</div>
+                </div>
+                """),
+                unsafe_allow_html=True,
+            )
+
             pc = st.columns(3)
             if algo_type == "ICEBERG":
-                algo_params["clip_size"] = pc[0].number_input("Clip size", min_value=1, value=max(1, int(qty) // 5), step=1)
+                algo_params["clip_size"] = pc[0].number_input("Clip size", min_value=1, value=max(1, calculated_qty // 5), step=1)
                 algo_params["price_limit"] = pc[1].number_input("Price limit (0 = none)", min_value=0.0, value=0.0, step=0.05)
                 algo_params["randomize_timing"] = pc[2].checkbox("Randomize timing", value=True, key="ib_rand")
             elif algo_type in ("TWAP", "VWAP"):
@@ -275,7 +443,7 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
                 "symbol": st.session_state["tt_symbol"],
                 "exchange": st.session_state["tt_exchange"],
                 "side": side,
-                "total_quantity": int(qty),
+                "total_quantity": calculated_qty,
                 "mode": mode,
             }
             for k, v in algo_params.items():
@@ -286,7 +454,7 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
                 "symbol": st.session_state["tt_symbol"],
                 "exchange": st.session_state["tt_exchange"],
                 "side": side,
-                "quantity": int(qty),
+                "quantity": calculated_qty,
                 "order_type": "LIMIT" if limit_price > 0 else "MARKET",
                 "limit_price": _clean(limit_price),
                 "mode": mode,
@@ -303,10 +471,22 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
             r = requests.post(url, json=body, headers=auth_headers(), timeout=30)
             if r.status_code == 200:
                 st.success(f"{body['side']} {'algo started' if kind == 'algo' else 'order placed'} for {body.get('symbol')}.")
+                fetch_funds.clear()
                 st.cache_data.clear()
                 st.rerun()
             else:
-                st.error(f"{r.status_code}: {r.text}")
+                # The backend's InsufficientFundsError message always contains "Insufficient balance"
+                # (see broker_base.py) — flagged as its own distinct warning here rather than folded
+                # into the generic error text, so it's unmistakable rather than easy to miss.
+                _detail = r.text
+                try:
+                    _detail = r.json().get("detail", r.text)
+                except Exception:
+                    pass
+                if "insufficient balance" in str(_detail).lower():
+                    st.warning(f"⚠️ Order not placed — insufficient balance. {_detail}")
+                else:
+                    st.error(f"{r.status_code}: {_detail}")
         except Exception as e:
             st.error(f"Connection failed: {e}")
 

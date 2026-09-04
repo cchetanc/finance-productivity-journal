@@ -21,7 +21,7 @@ from enum import Enum
 from typing import Optional
 
 from .algos import AlgoParams, AlgoType, build_strategy
-from .broker_base import BrokerClient, BrokerError, OrderResult, OrderSide, OrderStatus
+from .broker_base import BrokerClient, BrokerError, InsufficientFundsError, OrderResult, OrderSide, OrderStatus
 
 logger = logging.getLogger("trading.engine")
 
@@ -165,7 +165,9 @@ class ExecutionEngine:
         quote = await self.broker.get_quote(params.symbol, params.exchange)
         try:
             self.risk_limits.check_total_order(quote.ltp, params.total_quantity)
-        except RiskLimitError as e:
+            if params.side == OrderSide.BUY:
+                await self.check_funds(quote.ltp, params.total_quantity)
+        except (RiskLimitError, InsufficientFundsError) as e:
             execution.status = ExecutionStatus.FAILED
             execution.error_message = str(e)
             self._persist(execution)
@@ -173,6 +175,25 @@ class ExecutionEngine:
 
         asyncio.create_task(self._run(execution))
         return execution
+
+    async def check_funds(self, estimated_price: float, quantity: int):
+        """Flags a BUY (algo or child order) that the wallet can't actually
+        cover, BEFORE it's sent to the broker — this is what lets a chat-
+        triggered 'auto trade' say plainly 'insufficient balance' instead of
+        either silently failing at the broker or, worse, partially filling
+        an order the user can't really afford. SELL orders don't need cash
+        (they need holdings, which the broker itself will reject if short),
+        so this is only ever called for BUY."""
+        try:
+            funds = await self.broker.get_funds()
+        except BrokerError as e:
+            # If we can't even read the balance, don't silently let the trade
+            # through — that defeats the point of this check.
+            logger.warning("Funds check could not read wallet balance: %s", e)
+            raise
+        required = estimated_price * quantity
+        if required > funds.available_cash:
+            raise InsufficientFundsError(required=required, available=funds.available_cash)
 
     async def _run(self, execution: AlgoExecution):
         execution.status = ExecutionStatus.RUNNING
@@ -190,6 +211,8 @@ class ExecutionEngine:
                 quote = await self.broker.get_quote(child_order.symbol, child_order.exchange)
                 est_price = child_order.limit_price or quote.ltp
                 self.risk_limits.check_child_order(est_price, child_order.quantity)
+                if child_order.side == OrderSide.BUY:
+                    await self.check_funds(est_price, child_order.quantity)
 
                 try:
                     result = await self.broker.place_order(child_order)
@@ -209,6 +232,9 @@ class ExecutionEngine:
         except RiskLimitError as e:
             execution.status = ExecutionStatus.FAILED
             execution.error_message = f"Risk limit breached, execution halted: {e}"
+        except InsufficientFundsError as e:
+            execution.status = ExecutionStatus.FAILED
+            execution.error_message = f"Insufficient balance, execution halted: {e}"
         except Exception as e:  # noqa: BLE001
             logger.exception("Execution %s failed", execution.execution_id)
             execution.status = ExecutionStatus.FAILED
