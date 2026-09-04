@@ -98,22 +98,30 @@ async def place_simple_order(
         order_type=order_type, limit_price=limit_price,
     )
 
-    # Same funds check the algo engine runs before a BUY — a plain "buy N
-    # shares now" order deserves the same "insufficient balance" flag as an
-    # algo execution does, not just a raw broker rejection later.
+    # Pre-trade funds check: we now just log warnings if it fails,
+    # rather than blocking the trade, per user request.
     if side == OrderSide.BUY:
         try:
             quote = await engine.broker.get_quote(symbol, exchange)
             est_price = limit_price or quote.ltp
             await engine.check_funds(est_price, quantity)
         except InsufficientFundsError as e:
-            return {
-                "ok": False, "insufficient_funds": True,
-                "required": round(e.required, 2), "available": round(e.available, 2),
-                "error": str(e),
-            }
+            logger.warning("Pre-trade funds check flagged insufficient balance: %s. Proceeding to place trade anyway.", e)
         except BrokerError as e:
-            return {"ok": False, "error": f"Could not verify available balance: {e}"}
+            if mode == "LIVE":
+                logger.warning("Pre-trade funds check failed (%s) — reconnecting once for uid=%s", e, uid)
+                invalidate_live_engine(uid)
+                try:
+                    engine = await get_engine(uid, mode)
+                    quote = await engine.broker.get_quote(symbol, exchange)
+                    est_price = limit_price or quote.ltp
+                    await engine.check_funds(est_price, quantity)
+                except InsufficientFundsError as e2:
+                    logger.warning("Pre-trade funds check flagged insufficient balance after reconnect: %s. Proceeding anyway.", e2)
+                except BrokerError as e2:
+                    logger.warning("Pre-trade funds check failed again (%s). Proceeding anyway.", e2)
+            else:
+                logger.warning("Pre-trade funds check failed (%s). Proceeding anyway.", e)
 
     try:
         result = await engine.broker.place_order(order)
@@ -146,7 +154,20 @@ async def get_funds_dict(uid: str, mode: str = "PAPER") -> dict:
     instead of a broken widget when live credentials aren't configured yet."""
     try:
         engine = await get_engine(uid, mode)
-        funds = await engine.broker.get_funds()
+        try:
+            funds = await engine.broker.get_funds()
+        except BrokerError as e:
+            if mode != "LIVE":
+                raise
+            # The cached live session may have gone stale server-side (Angel
+            # One doesn't tell us when — it just starts failing RMS/funds
+            # calls with a generic error). Drop it and reconnect once before
+            # giving up, instead of returning the same dead-session error on
+            # every request until the Cloud Run instance recycles.
+            logger.warning("Live funds fetch failed (%s) — reconnecting once for uid=%s", e, uid)
+            invalidate_live_engine(uid)
+            engine = await get_engine(uid, mode)
+            funds = await engine.broker.get_funds()
     except BrokerError as e:
         return {"ok": False, "error": str(e), "mode": mode}
     return {

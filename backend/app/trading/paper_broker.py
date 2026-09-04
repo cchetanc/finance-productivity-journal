@@ -65,8 +65,8 @@ class PaperBrokerClient(BrokerClient):
         # would be blocked for insufficient balance too.
         if fill_price and order.side == OrderSide.BUY:
             cost = fill_price * order.quantity
-            if cost > self._cash:
-                raise InsufficientFundsError(required=cost, available=self._cash)
+            # Bypassing the hard rejection for insufficient funds per user request.
+            # Cash will simply go negative.
             self._cash -= cost
         elif fill_price and order.side == OrderSide.SELL:
             self._cash += fill_price * order.quantity
