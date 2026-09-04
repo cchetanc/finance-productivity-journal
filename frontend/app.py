@@ -60,55 +60,6 @@ iframe { display: block; }
 </style>
 """, unsafe_allow_html=True)
 
-def _tradingview_symbol(yf_symbol: str) -> str:
-    """Converts a yfinance-resolved symbol (e.g. 'RELIANCE.NS', '500325.BO')
-    into TradingView's EXCHANGE:SYMBOL format. Falls back to the bare symbol
-    (no prefix) for anything without a recognized Indian-exchange suffix —
-    TradingView's widget still resolves plain US tickers like 'AAPL' fine
-    without an explicit exchange prefix."""
-    s = (yf_symbol or "").strip()
-    if s.upper().endswith(".NS"):
-        return f"NSE:{s[:-3].upper()}"
-    if s.upper().endswith(".BO"):
-        return f"BSE:{s[:-3].upper()}"
-    return s.upper()
-
-
-def _tradingview_chart_html(yf_symbol: str, height: int = 420) -> str:
-    """Real interactive candlestick chart (pan/zoom, timeframe switcher,
-    indicators) via TradingView's free embeddable "Advanced Real-Time
-    Chart" widget — replaces the old static SVG line (which just traced a
-    flat line through daily closes and looked like a screenshot, with no
-    interactivity). Renders client-side in the visitor's own browser via
-    components.html's sandboxed iframe, so it needs no server-side
-    plotting library and no data of our own beyond the symbol."""
-    tv_symbol = _tradingview_symbol(yf_symbol)
-    container_id = f"tv_chart_{abs(hash(tv_symbol))}_{uuid.uuid4().hex[:6]}"
-    return f'''
-<div class="tradingview-widget-container" style="height:{height}px;">
-  <div id="{container_id}" style="height:100%;"></div>
-</div>
-<script src="https://s3.tradingview.com/tv.js"></script>
-<script>
-new TradingView.widget({{
-  "autosize": true,
-  "symbol": "{tv_symbol}",
-  "interval": "D",
-  "timezone": "Asia/Kolkata",
-  "theme": "dark",
-  "style": "1",
-  "locale": "en",
-  "toolbar_bg": "#1a1610",
-  "backgroundColor": "#15120e",
-  "gridColor": "rgba(70, 59, 40, 0.35)",
-  "enable_publishing": false,
-  "hide_side_toolbar": false,
-  "allow_symbol_change": false,
-  "save_image": false,
-  "container_id": "{container_id}"
-}});
-</script>
-'''
 
 
 # ── AUTH GATE (app-wide — not just the trade terminal) ─────────────────────────
@@ -1087,8 +1038,42 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                     </div>
                     </div>
                     """)
-                    html_card = _card_header + "\n" + msg["text"] + "\n" + _card_footer
+                    _msg_text = msg["text"]
+                    _chart_payload = None
+                    import re, json
+                    _match = re.search(r'```json\s*(\{.*?"InteractiveChart".*?\})\s*```', _msg_text, re.DOTALL)
+                    if _match:
+                        try:
+                            _chart_payload = json.loads(_match.group(1))
+                            _msg_text = _msg_text.replace(_match.group(0), "")
+                        except Exception:
+                            pass
+                            
+                    html_card = _card_header + "\n" + _msg_text + "\n" + _card_footer
                     st.markdown(html_card, unsafe_allow_html=True)
+                    
+                    if _chart_payload and _chart_payload.get("component") == "InteractiveChart":
+                        c_type = _chart_payload.get("chartType", "line")
+                        c_title = _chart_payload.get("title", "")
+                        if c_title:
+                            st.caption(f"**{c_title}**")
+                        
+                        import pandas as pd
+                        df_data = {}
+                        labels = []
+                        for s in _chart_payload.get("series", []):
+                            s_name = s.get("name", "Value")
+                            s_data = s.get("data", [])
+                            if not labels:
+                                labels = [d.get("label", "") for d in s_data]
+                            df_data[s_name] = [d.get("value", 0) for d in s_data]
+                        
+                        if df_data and labels:
+                            df = pd.DataFrame(df_data, index=labels)
+                            if c_type == "bar":
+                                st.bar_chart(df)
+                            else:
+                                st.line_chart(df)
                     
                     # We still want to show the custom agent widgets below the text if it's the assistant
                     if not is_user:
@@ -1146,11 +1131,7 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                                 </div>
                             </div>
                             '''), unsafe_allow_html=True)
-                            # Real interactive TradingView chart (replaces the old flat SVG line — see
-                            # _tradingview_chart_html's docstring) — needs its own components.html call
-                            # since it's a <script>-bearing widget, not plain markup the chat card above can inline.
-                            if _snap.get("symbol"):
-                                components.html(_tradingview_chart_html(_snap["symbol"]), height=430)
+
     
                         _peers = _route.get("peers") if _route else None
                         if _peers and _peers.get("peers"):

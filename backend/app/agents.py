@@ -756,6 +756,23 @@ properly, not as flat text), so use that instead of writing dense prose paragrap
   can be read at a glance.
 - Keep section headers short (a bolded label or "###" is fine); don't write essay-style topic
   sentences before a list that just restate the header.
+
+DATA VISUALIZATION — Whenever the user asks for a chart, a trend comparison, or an asset breakdown, you must format your response to include a data visualization payload.
+CRITICAL RULE: Do not draw charts using text or ASCII art. Instead, output your visual response wrapped inside a clean, structured JSON code block using the format below. Keep your regular conversational text separate from the data payload.
+
+Expected Payload Format:
+```json
+{
+  "component": "InteractiveChart",
+  "chartType": "line" | "bar" | "pie",
+  "title": "Clear Chart Title",
+  "xAxisLabel": "Label Name",
+  "yAxisLabel": "Label Name",
+  "series": [
+    { "name": "Metric A", "data": [{"label": "Jan", "value": 15}, {"label": "Feb", "value": 22}] }
+  ]
+}
+```
 """
 
 

@@ -465,7 +465,7 @@ def place_trade_order(symbol: str, exchange: str, side: str, quantity: int,
         return {"ok": False, "error": "quantity must be a positive number of shares."}
 
     from .trading.broker_base import OrderSide, OrderType
-    from .trading.service import place_simple_order
+    from .trading.services import place_simple_order
 
     async def _run():
         return await place_simple_order(

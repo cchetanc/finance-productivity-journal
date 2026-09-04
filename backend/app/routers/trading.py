@@ -6,7 +6,7 @@ from typing import Optional
 
 from ..auth import get_current_user_uid
 from ..database import list_algo_executions, list_trades
-from ..trading import service as trading_service
+from ..trading import services as trading_service
 from ..trading.algos import AlgoParams, AlgoType
 from ..trading.broker_base import BrokerError, OrderSide, OrderType
 from ..trading.credentials import get_angel_one_credentials, save_angel_one_credentials, AngelOneCredentials
