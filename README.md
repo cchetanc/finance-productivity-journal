@@ -3,11 +3,12 @@
 ### An AI-native personal finance co-pilot — market intelligence, screening, and trade execution in one place
 
 > **Ideathon Cohort 3 Submission**
-> **Team Name:** `<your team name>`
-> **Team Members:** `<name 1>`, `<name 2>`, `<name 3>` — `<roles, e.g. Backend, Frontend, AI/Agents>`
-> **Track / Problem Statement:** `<the track or problem statement this idea addresses>`
-> **Submission Date:** `<date>`
-> **Demo Video:** `<link>`  |  **Live Deployment:** `<link>`  |  **Pitch Deck:** `<link>`
+> **Team Name:** `Chetan P Kamath`
+> **Team Members:** `Chetan P Kamath`
+> **Track / Problem Statement:** `Build a Secure "Personal Gemini Journal"`
+> **Submission Date:** `05 September 2026`
+> **Demo Video:** `<link>`  
+> **Live Deployment:** `https://finance-prod-app-frontend-36680800010.asia-south1.run.app/`    
 
 ---
 
@@ -124,7 +125,7 @@ right analyst, rather than one generic chatbot bluffing its way through every do
 
 ```bash
 # 1. Clone
-git clone <your-repo-url>
+git clone https://github.com/cchetanc/finance-productivity-journal.git
 cd finance-productivity-journal
 
 # 2. Backend
@@ -144,10 +145,7 @@ streamlit run app.py
 > configured per-user from the Trade Terminal's "Connect Broker" panel. PAPER mode works out of
 > the box with no broker credentials.
 
-## 9. Screenshots / Demo
-
-`<Add 3–5 screenshots or a short GIF here: the AI desk giving a stock recommendation, the
-breakout screen, the Trade Terminal with the live wallet balance, the Equity Screener.>`
+## 9. Demo
 
 `<Demo video link>`
 
@@ -170,14 +168,14 @@ breakout screen, the Trade Terminal with the live wallet balance, the Equity Scr
 - Backtesting the breakout screener's historical hit rate, and surfacing that transparently.
 - Deeper portfolio-level risk view (sector concentration, correlation) rather than
   per-trade-only risk checks.
-- Algorithm that can build winning portfolio on its own on the horizon of shortterm or intraday knd of positions for a autonomous winnning trade and side income
+- Algorithm that can build winning portfolio on its own on the horizon of shortterm or intraday knd of positions for a autonomous winnning trade and side income.
+- A recommendation from an expert quant analyst which we might want to take up immediately, in such case messaging the agent should complete the task.
 ## 12. Team
 
-| Name | Role | Contact |
+| Name | Contact |
 |---|---|---|
-| `<Name>` | `<Role>` | `<email / LinkedIn>` |
-| `<Name>` | `<Role>` | `<email / LinkedIn>` |
-| `<Name>` | `<Role>` | `<email / LinkedIn>` |
+| `Chetan P Kamath` |  `cchetanc@gmail.com / https://www.linkedin.com/in/chetan-pandurang-kamath-0682449/` |
+
 
 ---
 
