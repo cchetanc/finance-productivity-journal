@@ -182,5 +182,4 @@ breakout screen, the Trade Terminal with the live wallet balance, the Equity Scr
 
 ---
 
-*Built for Ideathon Cohort 3. `<Add license / acknowledgments here if required by your
-program's guidelines.>`*
+*Built for Ideathon Cohort 3.
