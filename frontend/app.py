@@ -297,7 +297,15 @@ bias         = mood_data.get("bias", "NEUTRAL")
 flags        = mood_data.get("macro_risk_flags", [])
 indices      = mood_data.get("indices", [])
 index_groups = mood_data.get("index_groups", {})
-sc           = "#c16b57" if score < 35 else ("#d3a94a" if score < 65 else "#8fae64")
+# Shared semantic colors — used consistently across the ticker strip, the
+# sentiment gauge, and the Live Wire badges below, instead of each panel
+# picking its own slightly different red/green/amber (which is what made
+# the dashboard feel inconsistent rather than intentional).
+_C_BULL    = "#6FBF8B"
+_C_BEAR    = "#E2726A"
+_C_AMBER   = "#D9A83B"
+_C_NEUTRAL = "#8f8973"
+sc           = _C_BEAR if score < 35 else (_C_AMBER if score < 65 else _C_BULL)
 
 news_items   = fetch_news_raw(st.session_state.v_news)
 sent_map     = {}
@@ -314,7 +322,7 @@ for idx in indices[:8]:
     if not idx or idx.get("price", 0) == 0:
         continue
     pos = idx.get("positive", False)
-    col = "#8fae64" if pos else "#c16b57"
+    col = _C_BULL if pos else _C_BEAR
     arrow = "&#9650;" if pos else "&#9660;"
     _ticker_syms += (
         f'<span style="padding:0 22px;">{html.escape(idx["name"])}&nbsp; '
@@ -352,15 +360,18 @@ def _render_sentiment_panel():
             st.rerun()
 
     flags_html = "".join([
-        f'<div style="display:flex;align-items:center;gap:7px;margin-bottom:8px;">'
+        f'<div style="display:flex;align-items:center;gap:7px;margin-bottom:10px;">'
         f'<div style="width:4px;height:4px;background:{sc};border-radius:50%;flex-shrink:0;"></div>'
         f'<span style="font-size:11.5px;color:#e8ddc7;font-weight:500;">{f}</span></div>'
         for f in (flags or ["No risk flags"])
     ])
+    # Clamp defensively — a bad/partial API response should never push the
+    # bar past its track instead of just looking a little off.
+    _score_pct = max(0, min(100, score))
     components.html(f"""
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
 <style>@keyframes blink{{0%,100%{{opacity:1;}}50%{{opacity:0.3;}}}}</style>
-<div style="background:#211b13;border:1px solid #332b1f;border-radius:8px;padding:20px 22px;height:258px;">
+<div style="background:#211b13;border:1px solid #332b1f;border-radius:8px;padding:20px 22px;min-height:258px;">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid #332b1f;padding-bottom:15px;margin-bottom:14px;">
         <div>
             <div style="font-size:10px;color:#a99872;text-transform:uppercase;font-weight:600;letter-spacing:1px;margin-bottom:5px;">Quantitative Bias</div>
@@ -371,10 +382,13 @@ def _render_sentiment_panel():
             <div><span style="font-size:44px;font-weight:900;color:{sc};line-height:1;">{score}</span><span style="font-size:16px;color:#a99872;font-weight:600;"> / 100</span></div>
         </div>
     </div>
+    <div style="height:5px;border-radius:3px;background:#332b1f;overflow:hidden;margin-bottom:16px;">
+        <div style="width:{_score_pct}%;height:100%;background:{sc};"></div>
+    </div>
     <div style="font-size:10px;color:#a99872;text-transform:uppercase;font-weight:700;letter-spacing:1px;margin-bottom:10px;">Live Risk Flags</div>
     {flags_html}
 </div>
-""", height=276)
+""", height=296)
 
 def _render_live_wire():
     hdr, btn = st.columns([6, 1])
@@ -408,21 +422,21 @@ def _render_live_wire():
         pub      = html.escape(n.get("published", ""), quote=True)
 
         if sent == "BULLISH":
-            sym, s_col, s_bg = "▲", "#8fae64", "rgba(143,174,100,0.10)"
+            sym, s_col, s_bg = "▲", _C_BULL, "rgba(111,191,139,0.10)"
         elif sent == "BEARISH":
-            sym, s_col, s_bg = "▼", "#c16b57", "rgba(193,107,87,0.10)"
+            sym, s_col, s_bg = "▼", _C_BEAR, "rgba(226,114,106,0.10)"
         else:
-            sym, s_col, s_bg = "●", "#a99872", "transparent"
+            sym, s_col, s_bg = "●", _C_NEUTRAL, "transparent"
 
         rows_html += f"""
-<div style="padding:8px 12px 8px 13px;margin-bottom:3px;border-left:3px solid {s_col};background:{s_bg};">
-    <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+<div style="padding:10px 14px 10px 15px;margin-bottom:6px;border-left:3px solid {s_col};background:{s_bg};">
+    <div style="display:flex;align-items:center;gap:7px;margin-bottom:5px;">
         <span style="font-size:14px;color:{s_col};font-weight:900;line-height:1;">{sym}</span>
-        <span style="font-size:9px;font-weight:700;color:{s_col};font-family:monospace;border:1px solid {s_col};padding:1px 5px;border-radius:2px;">{sent}</span>
+        <span style="font-size:9px;font-weight:700;color:#15120e;background:{s_col};padding:2px 7px;border-radius:10px;letter-spacing:0.3px;">{sent}</span>
         <span style="font-size:9px;color:#7d6e50;font-family:monospace;">{src} · {pub}</span>
     </div>
     <a href="{link}" target="_blank"
-       style="font-size:12.5px;color:#e8ddc7;text-decoration:none;line-height:1.5;font-weight:500;display:block;"
+       style="font-size:12.5px;color:#e8ddc7;text-decoration:none;line-height:1.55;font-weight:500;display:block;"
        onmouseover="this.style.color='#d3a94a'" onmouseout="this.style.color='#e8ddc7'">{title}</a>
 </div>"""
 
@@ -474,8 +488,8 @@ div[class*="st-key-equity_side_box"] a[data-testid="stPageLink-NavLink"] {
     background: transparent !important;
     border: 1px solid #332b1f !important;
     border-radius: 6px !important;
-    padding: 7px 10px !important;
-    margin-bottom: 6px !important;
+    padding: 9px 12px !important;
+    margin-bottom: 8px !important;
     transition: all 0.15s ease !important;
 }
 div[class*="st-key-equity_side_box"] a[data-testid="stPageLink-NavLink"]:hover {
@@ -486,6 +500,18 @@ div[class*="st-key-equity_side_box"] a[data-testid="stPageLink-NavLink"] p {
     color: #e8ddc7 !important;
     font-size: 12.5px !important;
     font-weight: 500 !important;
+}
+/* Trade Terminal is the one action item in this list, not just another
+   deep-dive link — a standing amber accent (not just on hover) sets it
+   apart, same idea as the mockup's highlighted nav entry. It's always the
+   5th (last) stPageLink in this box, see the st.page_link calls below. */
+div[class*="st-key-equity_side_box"] a[data-testid="stPageLink-NavLink"]:nth-of-type(5) {
+    border-color: #D9A83B !important;
+    background: rgba(217,168,59,0.08) !important;
+}
+div[class*="st-key-equity_side_box"] a[data-testid="stPageLink-NavLink"]:nth-of-type(5) p {
+    color: #D9A83B !important;
+    font-weight: 600 !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -1263,7 +1289,7 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                                     "location": st.session_state.user_location,
                                     "history": recent_history,
                                     "id_token": get_id_token(),
-                                }, timeout=60)
+                                }, timeout=180)
                                 
                                 if resp.status_code == 200:
                                     data = resp.json()
@@ -1283,6 +1309,11 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                                     except Exception:
                                         err_text = resp.text
                                     st.session_state.voice_history.append({"role": "cfa", "text": f"**Error {resp.status_code}**: {err_text}"})
+                            except requests.exceptions.Timeout:
+                                st.session_state.voice_history.append({
+                                    "role": "cfa",
+                                    "text": "⏱️ **Request timed out**: The assistant took longer than expected to formulate the deep multi-desk financial analysis (or the backend was cold-starting). Please try asking again."
+                                })
                             except Exception as e:
                                 st.session_state.voice_history.append({"role": "cfa", "text": f"**Connection failed**: {e}"})
                             finally:
