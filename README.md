@@ -250,6 +250,26 @@ Before *any* child order reaches the broker, the engine checks a per-order and t
 6. **Sufficient live margin/cash** in the account — every BUY is checked against it pre-trade, on top of whatever intraday leverage/delivery-margin rules Angel One itself enforces.
 7. There is currently **no paper-trading/simulation mode** — every connected credential is a real account, and every confirmed order (terminal or chat) is a real order, so conservative `RiskLimits` (`max_order_value` / `max_total_value`) are strongly recommended for a live demo.
 
+### 7.6 Static IP Setup for Algo Trades & Regulatory Compliance
+
+To meet stringent regulatory and security requirements for algorithmic trading, brokers like Angel One mandate that all API requests originate from a **whitelisted Static IP address**. By default, Google Cloud Run services use dynamic outbound IPs. To solve this, the application routes outbound trading traffic through a static IP using a Serverless VPC Access Connector and Cloud NAT.
+
+**How it works:**
+1. The backend Cloud Run service directs egress traffic to a **Serverless VPC Access Connector**.
+2. The connector routes traffic into a private **VPC Network**.
+3. A **Cloud Router** and **Cloud NAT** are configured on this VPC.
+4. Cloud NAT translates the internal IPs to a reserved, static **External IP address**.
+5. The broker (Angel One) receives the API requests from this single, static IP, ensuring compliance and secure API interactions.
+
+```mermaid
+flowchart LR
+    A[Cloud Run Backend] -->|Egress Traffic| B(Serverless VPC Access)
+    B --> C[VPC Network]
+    C --> D(Cloud NAT)
+    D -->|Translates to Static IP| E[Cloud Router]
+    E -->|Whitelisted API Request| F((Broker API - Angel One))
+```
+
 ## 8. Tech Stack
 
 | Layer | Technology |
@@ -352,4 +372,6 @@ streamlit run app.py
 
 ---
 
-*Built for Ideathon Cohort 3.
+*Built for Ideathon Cohort 3. 
+##dev-tutorial=cloud-run-ai-challenge
+##AccelerateAIwithCloudRun 
