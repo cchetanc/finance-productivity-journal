@@ -1056,6 +1056,7 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                     is_user = (msg["role"] == "user")
                     name = "You" if is_user else "Daily Productivity Assistant"
                     bg_color = "#2a2d32" if is_user else "#1e1e24" # Dark theme card colors
+                    border_color = "#3a3d42" if is_user else "#2e2e34"
                     ts_val = msg.get("timestamp")
                     if ts_val:
                         try:
