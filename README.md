@@ -1,4 +1,3 @@
-# finance-productivity-journal
 # 💹 Finance Intelligence Journal
 ### An AI-native personal finance co-pilot — market intelligence, screening, and trade execution in one place
 
