@@ -199,10 +199,16 @@ components.html(f"""
 </div>
 <script>
 function fjTick() {{
-    const d = new Date(new Date().getTime() + (5.5*60 - new Date().getTimezoneOffset())*60000);
-    const p = n => String(n).padStart(2,'0');
     const el = document.getElementById('fj-clock');
-    if (el) el.textContent = p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+    if (el) {{
+        el.textContent = new Intl.DateTimeFormat('en-IN', {{
+            timeZone: 'Asia/Kolkata',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        }}).format(new Date());
+    }}
 }}
 fjTick(); setInterval(fjTick, 1000);
 </script>
@@ -778,7 +784,7 @@ def _load_daily_chat() -> None:
         resp.raise_for_status()
         data = resp.json()
         st.session_state.voice_history = [
-            {"role": m["role"], "text": m["text"], "route": m.get("route")}
+            {"role": m["role"], "text": m["text"], "route": m.get("route"), "timestamp": m.get("timestamp")}
             for m in data.get("messages", [])
         ]
         st.session_state.chat_loaded_date = data.get("date") or _today_ist_key
@@ -1050,8 +1056,17 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                     is_user = (msg["role"] == "user")
                     name = "You" if is_user else "Daily Productivity Assistant"
                     bg_color = "#2a2d32" if is_user else "#1e1e24" # Dark theme card colors
-                    border_color = "#3a3d42" if is_user else "#2e2e34"
-                    timestamp = datetime.datetime.now().strftime("%I:%M %p") # ideally we'd store real timestamp
+                    ts_val = msg.get("timestamp")
+                    if ts_val:
+                        try:
+                            dt = datetime.datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=datetime.timezone.utc)
+                            timestamp = dt.astimezone(IST).strftime("%I:%M %p")
+                        except Exception:
+                            timestamp = datetime.datetime.now(IST).strftime("%I:%M %p")
+                    else:
+                        timestamp = datetime.datetime.now(IST).strftime("%I:%M %p")
                     
                     # Use Streamlit's native markdown rendering by wrapping the text with blank lines inside the HTML.
                     # IMPORTANT: any HTML line indented 4+ spaces (and preceded by a blank line) gets treated by
@@ -1302,20 +1317,30 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                                         "text": data.get("text", "No response received."),
                                         "audio": data.get("audio_base64"),
                                         "route": data.get("route"),
+                                        "timestamp": datetime.datetime.now(IST).isoformat(),
                                     })
                                 else:
                                     try:
                                         err_text = resp.json().get("detail", resp.text)
                                     except Exception:
                                         err_text = resp.text
-                                    st.session_state.voice_history.append({"role": "cfa", "text": f"**Error {resp.status_code}**: {err_text}"})
+                                    st.session_state.voice_history.append({
+                                        "role": "cfa",
+                                        "text": f"**Error {resp.status_code}**: {err_text}",
+                                        "timestamp": datetime.datetime.now(IST).isoformat(),
+                                    })
                             except requests.exceptions.Timeout:
                                 st.session_state.voice_history.append({
                                     "role": "cfa",
-                                    "text": "⏱️ **Request timed out**: The assistant took longer than expected to formulate the deep multi-desk financial analysis (or the backend was cold-starting). Please try asking again."
+                                    "text": "⏱️ **Request timed out**: The assistant took longer than expected to formulate the deep multi-desk financial analysis (or the backend was cold-starting). Please try asking again.",
+                                    "timestamp": datetime.datetime.now(IST).isoformat(),
                                 })
                             except Exception as e:
-                                st.session_state.voice_history.append({"role": "cfa", "text": f"**Connection failed**: {e}"})
+                                st.session_state.voice_history.append({
+                                    "role": "cfa",
+                                    "text": f"**Connection failed**: {e}",
+                                    "timestamp": datetime.datetime.now(IST).isoformat(),
+                                })
                             finally:
                                 st.session_state.pending_prompt_text = None
                                 st.session_state.pending_audio_b64 = None
@@ -1327,7 +1352,11 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
             # ── Text input ──
             user_query = st.chat_input("Ask your Daily Productivity Assistant...", key="bot_chat_input")
             if user_query:
-                st.session_state.voice_history.append({"role": "user", "text": user_query})
+                st.session_state.voice_history.append({
+                    "role": "user",
+                    "text": user_query,
+                    "timestamp": datetime.datetime.now(IST).isoformat(),
+                })
                 st.session_state.pending_prompt_text = user_query
                 try:
                     st.rerun(scope="fragment")
@@ -1342,7 +1371,11 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                     st.session_state.last_audio_id = audio_id
                     audio_bytes = mic_audio.getvalue()
                     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-                    st.session_state.voice_history.append({"role": "user", "text": "(voice message)"})
+                    st.session_state.voice_history.append({
+                        "role": "user",
+                        "text": "(voice message)",
+                        "timestamp": datetime.datetime.now(IST).isoformat(),
+                    })
                     st.session_state.pending_audio_b64 = audio_b64
                     try:
                         st.rerun(scope="fragment")
