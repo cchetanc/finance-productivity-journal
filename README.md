@@ -194,8 +194,8 @@ streamlit run app.py
 - Backtesting the breakout screener's historical hit rate, and surfacing that transparently.
 - Deeper portfolio-level risk view (sector concentration, correlation) rather than
   per-trade-only risk checks.
-- Algorithm that can build winning portfolio on its own on the horizon of shortterm or intraday knd of positions for a autonomous winnning trade and side income.
-- A recommendation from an expert quant analyst which we might want to take up immediately, in such case messaging the agent should complete the task.
+- Autonomous agent that can build winning portfolio on its own on the horizon of shortterm or intraday knd of positions for a autonomous winnning trade and side income.
+- A recommendation from an expert quant analyst which we might want to take up immediately can be executed by the Algo agent by means of an email or call receipt. This is as good as having a expert personal analyst which is today guided by several regulations and charged upon premium by most of the finance analysts.
 ## 13. Team
 
 | Name | Contact |
