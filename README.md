@@ -55,11 +55,17 @@ right analyst, rather than one generic chatbot bluffing its way through every do
 | 🔐 **Per-user, Firebase-authenticated data model** | Every data path (trades, journals, spending, credentials) is scoped to the signed-in user via server-verified UID — never client- or model-supplied. |
 | 🛡️ **Admin Panel & RBAC** | A dedicated admin dashboard backed by a Role-Based Access Control (RBAC) system. Admins can view provisioned users and toggle feature flags to control visibility of specific dashboard sections per user. |
 | 🗺️ **PathSense (Google Maps)** | Integrated safe-routing that uses the Google Maps Platform (Routes API) to suggest the safest and most efficient path for your commute, accessible natively through the Daily Productivity Assistant. |
+| 🔄 **Multi-Turn Conversational Memory** | Stateful context tracking across turns — disambiguates follow-up questions, carries financial context forward, and interprets bare acknowledgments ("go ahead", "do it"), with all daily turns persisted in Firestore across page reloads. |
 
 ## 4. Why This Is Different
 
 - **It closes the loop.** Most finance apps stop at "here's the data." We go from insight →
   explicit human confirmation → actual order placement, inside the same conversation.
+- **True multi-turn context with persistence.** The Daily Productivity Assistant doesn't
+  treat prompts in isolation. It retains dialogue history across multiple turns, contextually
+  disambiguates follow-ups (e.g., answering a clarifying question or confirming a recommended trade),
+  feeds shared context to specialized analyst desks, and saves the full conversation in Firestore
+  so your dialogue survives browser refreshes.
 - **Real agents, not one mega-prompt.** A router classifies intent and dispatches to
   domain-specific agents with their own tools and guardrails — closer to how an actual
   research desk operates, and easier to reason about/extend than a single do-everything prompt.
@@ -250,8 +256,8 @@ Before *any* child order reaches the broker, the engine checks a per-order and t
 |---|---|
 | **Frontend** | Streamlit (Python), custom components (`streamlit-keyup`), TradingView embedded widgets |
 | **Backend** | FastAPI, Python, Uvicorn |
-| **AI / Agents** | Google Gemini (`google-genai`) with function/tool calling, custom multi-agent router + synthesizer |
-| **Data & Auth** | Firebase Authentication, Google Cloud Firestore, Google Cloud Secret Manager |
+| **AI / Agents** | Google Gemini (`google-genai`) with function/tool calling, custom multi-agent router + synthesizer, stateful multi-turn dialogue memory |
+| **Data & Auth** | Firebase Authentication, Google Cloud Firestore (turn-by-turn chat history & screener cache), Google Cloud Secret Manager |
 | **Market Data** | `yfinance`, cached Firestore screener pipeline |
 | **Trading** | Angel One SmartAPI (`smartapi-python`), `pyotp` (TOTP login), custom execution engine (Iceberg / TWAP / VWAP / Momentum Sniper algos), Intraday/Delivery product-type support |
 | **Integrations** | Gmail API (OAuth, read-only) for spending insights, Google Maps Platform (Routes API) for PathSense, Google Cloud Speech-to-Text / Text-to-Speech for voice |
@@ -260,10 +266,7 @@ Before *any* child order reaches the broker, the engine checks a per-order and t
 ## 9. How It Works (User Flow)
 
 1. **Sign in** with Firebase Auth.
-2. **Ask the Daily Productivity Assistant** anything — "how's RELIANCE looking on NSE",
-   "any stocks about to break out", "what did I spend on food last month" — the router sends it
-   to the right specialist, which calls real tools (live quotes, screener queries, spending
-   summaries) rather than guessing.
+2. **Engage in multi-turn dialogue with the Daily Productivity Assistant** — ask complex multi-year planning questions (e.g., child education or corpus building), inquire about stocks or spending, and have natural follow-up conversations without losing context. The router intelligently classifies each turn and dispatches it to the appropriate specialist desk.
 3. **Explore deeper** via the Equity Screener, Mutual Fund Screener, Dividends & Corporate
    Actions, or Results Calendar pages.
 4. **Act on it** in the Trade Terminal — pick Intraday or Delivery, place a manual order or run
