@@ -214,9 +214,53 @@ equity_agent = SimpleAgent(
         sector/exchange filter if they gave one). Present the matches concisely — symbol, name,
         and the metrics that mattered to the filter — and if zero results come back, say so
         plainly and suggest loosening the criteria rather than inventing tickers.
+
+        WHEN THE USER WANTS TO PLACE, BUY, SELL, OR OTHERWISE EXECUTE A TRADE — this covers ANY phrasing
+        that names a symbol and wants it acted on, not just the literal words "buy"/"sell". Examples that
+        ALL count: "buy 10 shares of RELIANCE", "sell 5 shares of TCS", "place order for 1 share of
+        RELIANCE at current price", "place a limit order for 20 TCS at 3500", "get me 2 shares of INFY",
+        "can you please place order for RELIANCE" (even with no size given yet).
+        CRITICAL: YOU HAVE TRADING ACCESS VIA THE 'place_trade_order' TOOL. DO NOT REFUSE. DO NOT SAY YOU
+        LACK ACCESS OR THAT THE USER MUST USE A BROKER APP THEMSELVES.
+
+        Before calling 'place_trade_order' you need FOUR things confirmed. Ask for whichever of these the
+        user's message didn't already answer — one short question at a time is fine, don't interrogate them
+        with everything at once if only one thing is missing:
+
+        1. SIZE — how many shares, or how much money to invest. If the user gives a share count, use it
+           directly. If they give a rupee amount instead (e.g. "I want to invest 5000"), call
+           'get_stock_snapshot' (or 'get_market_data') for the current price, compute
+           shares = floor(amount / price), and tell them plainly: e.g. "That's 3 shares of RELIANCE at
+           ₹1,480 each (₹4,440 total) — ₹560 will be left over." If neither a share count nor an amount is
+           given at all, ask: "How many shares would you like, or how much would you like to invest?"
+
+        2. PRODUCT TYPE — Intraday or Delivery. If not stated, ask: "Is this an Intraday order (squared off
+           by end of day) or a Delivery order (shares held in your demat account)?" Never assume this
+           silently — it changes the actual risk/margin of the trade.
+
+        3. EXECUTION STYLE — how the order should actually be worked:
+           - "at current price" / "market price" / "market order" / no price mentioned -> order_type="MARKET".
+           - "at <price>" / "limit order" / any explicit price the user wants it held at -> order_type="LIMIT",
+             limit_price=that number.
+           - If the user hasn't said, offer the choice briefly: "Buy at the current market price, at a
+             specific rate you set, or using an execution algorithm (Iceberg, TWAP, VWAP, or Momentum
+             Sniper — useful mainly for larger orders)?" If they pick an algo, set algo_type accordingly and
+             ask only the parameters that algo actually needs (e.g. Iceberg needs a clip size; Momentum
+             Sniper needs a breakout trigger and, optionally, a stop-loss) — don't ask about parameters for
+             algos they didn't choose. For ordinary small retail-sized orders, market or limit is almost
+             always the right fit; only steer them toward an algo if they ask about it or the order is large.
+
+        4. SIDE — default to BUY unless the user says sell/exit/offload.
+
+        Once all four are settled (from the message, from your questions, or a clear mix of both), call
+        'place_trade_order' immediately with that exact symbol/side/quantity/product_type/order_type
+        (or algo_type + its params)/limit_price — don't ask again for anything already answered. Relay the
+        result plainly: quantity, product type, order type or algo, limit price if applicable, and status.
+        If insufficient_funds is true, say so plainly with the required vs. available amounts rather than
+        retrying automatically.
     """,
     output_key="equity_insight",
-    tools=["get_market_data", "get_market_movers", "query_equity_screener", "get_stock_snapshot", "get_peer_comparison"],
+    tools=["get_market_data", "get_market_movers", "query_equity_screener", "get_stock_snapshot", "get_peer_comparison", "place_trade_order"],
 )
 
 mf_agent = SimpleAgent(
@@ -410,22 +454,53 @@ quants_agent = SimpleAgent(
            growth % that confirms it. Be explicit that this is a momentum+volume heuristic from cached
            data, NOT a chart-pattern-confirmed breakout and NOT a guarantee — a shortlist worth a closer
            look, not a certainty.
-        3. Ask which one (if any) they'd like you to act on, and at what size (quantity) — do not assume
-           a quantity.
-        4. ONLY once the user has clearly confirmed ONE specific candidate with a quantity (e.g. "yes,
-           buy 10 of RELIANCE", "go ahead with the first one, 20 shares", or a follow-up "okay"/"do it"
-           that unambiguously refers to a single specific stock+quantity you JUST proposed): call
-           'place_trade_order' for that exact symbol/side/quantity. Default order_type="MARKET",
-           mode="PAPER" — only pass mode="LIVE" if the user explicitly used the words "live" or "real
-           money"/"real order" for this specific trade. A vague "sounds good" about the screen in general,
-           with no specific stock+quantity picked, is NOT confirmation — ask which one and how many first.
-        5. Relay the result plainly: if insufficient_funds is true, tell the user clearly the order was
+        3. Ask which one (if any) they'd like you to act on, and the SIZE — either a share count or a
+           rupee amount to invest — do not assume either.
+        4. Once a candidate is picked, resolve the same three things MODE 3 resolves before calling the
+           tool: size (convert a rupee amount to shares using the live price and tell them the leftover
+           balance), product type (Intraday or Delivery — ask if not stated), and execution style (market,
+           a specific limit rate, or a named algo). See MODE 3 steps 2-3 for exactly how.
+        5. ONLY once the user has clearly confirmed ONE specific candidate with all of the above settled
+           (e.g. "yes, buy 10 of RELIANCE, delivery, at market", or a follow-up "okay"/"do it" that
+           unambiguously refers to a single specific stock+size you JUST proposed, provided product type
+           and execution style are also already settled): call 'place_trade_order'. A vague "sounds good"
+           about the screen in general, with no specific stock+size picked, is NOT confirmation — ask
+           which one and how many/how much first.
+        6. Relay the result plainly: if insufficient_funds is true, tell the user clearly the order was
            NOT placed because of insufficient balance, and state the required vs. available amounts from
            the result — do not retry with a smaller size unless they ask you to. If it succeeded, confirm
-           what was actually filled (quantity, average price, status). If it failed for another reason,
-           relay that error plainly rather than guessing why.
+           what was actually filled (quantity, product type, average price, status). If it failed for
+           another reason, relay that error plainly rather than guessing why.
         Never call 'place_trade_order' more than once per explicit user confirmation, and never chain
         multiple trades from one confirmation.
+
+        MODE 3 — DIRECT ORDER (no breakout screen involved): the user directly names a symbol and wants
+        it acted on right now — e.g. "buy 10 shares of RELIANCE", "sell 5 TCS", "place order for
+        RELIANCE", "place a limit order for 20 TCS at 3500". This does NOT require a prior breakout
+        recommendation from you — act on it directly, but resolve everything below before calling the tool:
+        1. CRITICAL: YOU HAVE TRADING ACCESS VIA 'place_trade_order'. DO NOT REFUSE, and do not tell
+           the user to use a broker app themselves — that is exactly what this tool does for them.
+        2. SIZE: if a share count is given, use it. If a rupee amount is given instead (e.g. "invest
+           5000 in RELIANCE"), fetch the live price via 'get_stock_snapshot'/'get_market_data', compute
+           shares = floor(amount / price), and tell the user the resulting share count, the amount that
+           will actually be spent, and the leftover balance. If neither is given, ask "how many shares,
+           or how much would you like to invest?" before proceeding.
+        3. PRODUCT TYPE: ask "Intraday or Delivery?" if not stated — never default this silently.
+        4. EXECUTION STYLE: work out order_type/limit_price/algo_type from the wording — "at current
+           price"/"market price"/"market order"/no price mentioned -> order_type="MARKET". "limit order"
+           or any explicit price (e.g. "at 3500", "limit price ₹1500") -> order_type="LIMIT" with
+           limit_price set to that number. If the user asks about or wants an execution algorithm, use
+           algo_type ("ICEBERG"/"TWAP"/"VWAP"/"MOMENTUM_SNIPER") with only the params that algo needs. If
+           none of this is stated and the order isn't clearly large, briefly offer the choice (market /
+           a specific rate / an algorithm) rather than assuming. Default side to BUY unless they say
+           sell/exit/offload.
+        5. Call 'place_trade_order' immediately once symbol/side/size/product_type/execution-style are all
+           settled — do not re-ask for anything already given in the user's own message. A message that
+           already states symbol, size, product type, AND execution style up front needs no further
+           confirmation before calling the tool.
+        6. Relay the result plainly: quantity, product type, order type or algo (and limit price if
+           applicable), and status. If insufficient_funds is true, state the required vs. available
+           amounts and do not retry with a smaller size unless asked.
     """,
     output_key="quants_insight",
     tools=[
@@ -716,8 +791,16 @@ leisure_agent = SimpleAgent(
         4. "Hotels / places to stay / accommodation":
            Use the 'get_hotel_availability' tool if the user provides a location (derive lat/long as best as possible) and dates.
            Also use your live web search context to find internet scores/reviews for these hotels.
-           Generate the final result in a nice, precise tabular format containing: Hotel Name, Availability (Yes/No), Rooms Available, Lowest Rate, and Internet Score/Rating.
-           Do not invent hotel ratings—pull them strictly from web context or state they are unavailable.
+           If the tool returns an empty list or an error, do NOT fabricate a hotel table — say plainly
+           that you don't have live hotel inventory for this location (Amadeus has no real-time data
+           there) and, if you have live web search context, suggest 2-3 well-known hotels by name only
+           (no invented price/availability/rating numbers), pointing the user to a booking site for
+           real figures.
+           If the tool DOES return hotels, generate the final result in a nice, precise tabular format
+           containing: Hotel Name, Availability (Yes/No), Rooms Available, and Lowest Rate — using only
+           the tool's real values for these three columns, never invented or estimated ones — plus
+           Internet Score/Rating pulled strictly from web context, or "Unavailable" if web context
+           doesn't cover it.
 
         For non-movie, non-route, non-hotel leisure questions (restaurants, trips, weekend plans), give 3-5
         concrete options with one short line each on why they fit — still no long-form report, no
@@ -1095,9 +1178,16 @@ class Orchestrator:
         - QUANTS: genuinely quantitative asks — Sharpe/Sortino ratio, volatility/VaR, correlation,
           options/derivatives pricing/greeks, backtest-style statistical reasoning. ALSO covers
           breakout-candidate screening ("stocks about to break out", "momentum plays", "act like a
-          quant analyst and recommend some trades") and placing a trade the user is confirming in
-          response to such a recommendation — including a bare "okay"/"do it"/"go ahead" that clearly
-          continues a breakout recommendation QUANTS just made (see BARE ACKNOWLEDGMENTS above).
+          quant analyst and recommend some trades") AND ANY explicit request to place a trade or
+          order — regardless of exact wording, e.g. "buy 10 shares of RELIANCE", "sell 5 shares of
+          TCS", "place a limit order", "place order for 1 share of RELIANCE at current price", "get
+          me 2 shares of INFY" — including a bare "okay"/"do it"/"go ahead" that clearly continues a
+          breakout recommendation QUANTS just made (see BARE ACKNOWLEDGMENTS above). If the user asks
+          to buy, sell, or place/execute an order for a specific asset, route to QUANTS ONLY —
+          EQUITY also has trading access as a fallback for when QUANTS isn't otherwise relevant, but
+          a trade-execution message must resolve to EXACTLY ONE of EQUITY or QUANTS, never both, since
+          both would independently place the same real order. When in doubt for a pure trade
+          instruction/confirmation with no other analysis being asked for, pick QUANTS alone.
         - CHARTERED_ASSOCIATE: tax or accounting treatment specifically — capital gains tax, TDS, GST,
           ITR filing, indexation, tax-loss harvesting.
         - INSURANCE: life/health/term/vehicle/property insurance coverage, premiums, claims, policy
@@ -1208,6 +1298,18 @@ class Orchestrator:
         # PathSense route, and/or {"snapshot", "peers"} whenever the equity
         # agent called get_stock_snapshot / get_peer_comparison this turn.
         route_meta: dict = {}
+        # Hard guard against a REAL duplicate order: the router can legitimately
+        # match more than one domain (e.g. EQUITY + QUANTS) to the same trade-
+        # confirmation message, and each matched domain runs as its own agent in
+        # parallel via asyncio.gather below. Both agents carry 'place_trade_order'
+        # and both are instructed to act on an explicit confirmation, so without
+        # this guard two agents can each independently place the same real order.
+        # This lock makes 'place_trade_order' execute at most once per user turn
+        # — across every domain agent and every tool-call round — regardless of
+        # how many agents or function calls attempt it. (A prompt-only "don't call
+        # this twice" instruction isn't reliable enough on its own for something
+        # that moves real money.)
+        _trade_execution = {"lock": asyncio.Lock(), "done": False}
 
         async def run_domain_agent(agent_name: str):
             agent = self.agent_map.get(agent_name)
@@ -1285,9 +1387,41 @@ class Orchestrator:
                         impl = TOOL_IMPLS.get(tool_name)
                         if impl is None:
                             result = {"error": f"Unknown tool '{tool_name}'."}
+                        elif tool_name == "place_trade_order":
+                            # See _trade_execution's definition above: at most one
+                            # real placement per user turn, no matter how many
+                            # domain agents (or repeated calls within one agent)
+                            # try to place it.
+                            async with _trade_execution["lock"]:
+                                if _trade_execution["done"]:
+                                    result = {
+                                        "ok": False,
+                                        "duplicate_suppressed": True,
+                                        "error": (
+                                            "Not placed: an order was already placed once for this "
+                                            "confirmation earlier in this same turn (likely by another "
+                                            "advisor desk answering the same message). Refusing to place "
+                                            "it a second time to avoid a duplicate real order. If you "
+                                            "actually want a second, separate order, ask again explicitly."
+                                        ),
+                                    }
+                                else:
+                                    try:
+                                        result = impl(args)
+                                        import inspect
+                                        if inspect.iscoroutine(result):
+                                            result = await result
+                                    except Exception as e:
+                                        logging.error(f"{agent.name} tool '{tool_name}' failed: {e}")
+                                        result = {"error": str(e)}
+                                    finally:
+                                        _trade_execution["done"] = True
                         else:
                             try:
                                 result = impl(args)
+                                import inspect
+                                if inspect.iscoroutine(result):
+                                    result = await result
                             except Exception as e:
                                 logging.error(f"{agent.name} tool '{tool_name}' failed: {e}")
                                 result = {"error": str(e)}
@@ -1310,7 +1444,9 @@ class Orchestrator:
                             route_meta["breakout_candidates"] = result
                         if tool_name == "place_trade_order" and isinstance(result, dict):
                             # Keep only the LAST trade result if the model somehow calls this more than
-                            # once in a turn (it's instructed not to) — one confirmation, one trade, one card.
+                            # once in a turn — cosmetic now (the lock above already prevents more than
+                            # one from ever actually reaching the broker), but still right for display
+                            # if a duplicate/suppressed attempt also produced a result.
                             route_meta["trade_result"] = result
 
                         response_parts.append(

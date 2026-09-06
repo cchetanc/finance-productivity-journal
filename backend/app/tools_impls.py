@@ -423,25 +423,36 @@ def scan_breakout_candidates(limit: int = 5) -> dict:
         return {"error": f"Could not read the screener cache: {e}", "candidates": []}
 
 
-def place_trade_order(symbol: str, exchange: str, side: str, quantity: int,
+async def place_trade_order(symbol: str, exchange: str, side: str, quantity: int,
                        order_type: str = "MARKET", limit_price: float = None,
-                       mode: str = "PAPER") -> dict:
-    """Places a real order through the signed-in user's own trading account —
-    PAPER (simulated, default) or LIVE (real money via their connected Angel
-    One account). uid comes ONLY from the server-verified request context
-    (see set_current_uid above), never from the model, exactly like
-    get_upi_spending_summary — a model asking "whose account" isn't a
-    question this tool accepts.
+                       product_type: str = "INTRADAY", algo_type: str = None,
+                       clip_size: int = None, price_limit: float = None,
+                       duration_minutes: int = None, slice_count: int = None,
+                       breakout_price: float = None, stop_loss_price: float = None,
+                       watch_timeout_minutes: int = 30) -> dict:
+    """Places a real LIVE order through the signed-in user's own connected Angel One
+    trading account. uid comes ONLY from the server-verified request context
+    (see set_current_uid above), never from the model.
 
     ONLY call this after the user has explicitly confirmed a SPECIFIC trade
-    (symbol, side, and quantity) that you already named to them in your
-    immediately preceding message — a generic "sure"/"okay" with no clear
-    antecedent is NOT confirmation, and neither is enthusiasm about a
-    breakout screen in general. Never call this speculatively "to see what
-    happens." Default to mode="PAPER" unless the user has explicitly used
-    the words "live"/"real money"/"real order" for THIS trade — do not
-    infer LIVE mode from general enthusiasm or from a mode used earlier in
-    the conversation.
+    (symbol, side, quantity, product_type — Intraday or Delivery — and how
+    they want it executed: at market, at a specific limit price, or via a
+    named execution algo) that you already named to them in your immediately
+    preceding message — a generic "sure"/"okay" with no clear antecedent is
+    NOT confirmation. Never call this speculatively "to see what happens."
+
+    product_type MUST be resolved with the user before calling this — never
+    default it silently. 'INTRADAY' means the position is squared off by the
+    broker before market close (margin-funded, no delivery). 'DELIVERY'
+    (a.k.a. CNC) means shares are actually taken into the demat account /
+    held. Ask "Intraday or Delivery?" if the user hasn't said.
+
+    algo_type, if set, explicitly runs one of the execution algorithms
+    (ICEBERG / TWAP / VWAP / MOMENTUM_SNIPER) instead of a plain market/limit
+    order or the automatic smart-router — use this when the user has chosen
+    a specific strategy themselves. Leave it unset for a plain order (the
+    automatic smart-router may still upgrade a very large plain order to an
+    algo on its own). See each algo's specific params below.
 
     If the wallet doesn't have enough balance for a BUY, this returns
     insufficient_funds=true rather than an opaque error — tell the user
@@ -458,25 +469,66 @@ def place_trade_order(symbol: str, exchange: str, side: str, quantity: int,
     order_type_u = (order_type or "MARKET").upper()
     if order_type_u not in ("MARKET", "LIMIT"):
         return {"ok": False, "error": f"order_type must be MARKET or LIMIT, got '{order_type}'."}
-    mode_u = (mode or "PAPER").upper()
-    if mode_u not in ("PAPER", "LIVE"):
-        return {"ok": False, "error": f"mode must be PAPER or LIVE, got '{mode}'."}
+    product_type_u = (product_type or "INTRADAY").upper()
+    if product_type_u not in ("INTRADAY", "DELIVERY"):
+        return {"ok": False, "error": f"product_type must be INTRADAY or DELIVERY, got '{product_type}'."}
     if not quantity or quantity <= 0:
         return {"ok": False, "error": "quantity must be a positive number of shares."}
 
-    from .trading.broker_base import OrderSide, OrderType
-    from .trading.services import place_simple_order
+    from .trading.broker_base import OrderSide, OrderType, ProductType
+    from .trading.services import place_simple_order, get_engine
 
-    async def _run():
-        return await place_simple_order(
-            uid, symbol=symbol, exchange=exchange or "NSE",
-            side=OrderSide(side_u), quantity=int(quantity),
-            order_type=OrderType(order_type_u), limit_price=limit_price,
-            mode=mode_u,
-        )
+    product_type_enum = ProductType(product_type_u)
 
     try:
-        return _run_coro_blocking(_run())
+        engine = await get_engine(uid)
+
+        if algo_type:
+            from .trading.algos import AlgoParams, AlgoType
+            algo_type_u = (algo_type or "").upper()
+            try:
+                algo_type_enum = AlgoType(algo_type_u)
+            except ValueError:
+                return {"ok": False, "error": f"algo_type must be one of ICEBERG, TWAP, VWAP, MOMENTUM_SNIPER, got '{algo_type}'."}
+            if algo_type_enum == AlgoType.LIMIT:
+                return {"ok": False, "error": "algo_type 'LIMIT' isn't a selectable strategy — omit algo_type for a plain order instead."}
+
+            params = AlgoParams(
+                symbol=symbol, exchange=exchange or "NSE", side=OrderSide(side_u),
+                total_quantity=int(quantity), product_type=product_type_enum,
+                clip_size=clip_size, price_limit=price_limit if price_limit is not None else limit_price,
+                duration_minutes=duration_minutes, slice_count=slice_count,
+                breakout_price=breakout_price, stop_loss_price=stop_loss_price,
+                watch_timeout_minutes=watch_timeout_minutes,
+            )
+            algo_exec = await engine.start(uid, algo_type_enum, params)
+            return {
+                "ok": True,
+                "message": f"{algo_type_enum.value} execution started for {quantity} {symbol} ({product_type_u}).",
+                "execution_id": algo_exec.execution_id,
+            }
+
+        from .trading.algo_selector import choose_execution_plan
+        plan = await choose_execution_plan(engine.broker, symbol, exchange or "NSE", OrderSide(side_u), int(quantity))
+
+        if plan["type"] == "algo":
+            plan["params"].product_type = product_type_enum
+            algo_exec = await engine.start(uid, plan["algo_type"], plan["params"])
+            return {
+                "ok": True,
+                "message": f"Smart routing selected {plan['algo_type'].value} strategy for this order. Execution started.",
+                "execution_id": algo_exec.execution_id
+            }
+        else:
+            final_order_type = plan.get("order_type", OrderType(order_type_u))
+            final_limit_price = plan.get("limit_price", limit_price)
+
+            return await place_simple_order(
+                uid, symbol=symbol, exchange=exchange or "NSE",
+                side=OrderSide(side_u), quantity=int(quantity),
+                order_type=final_order_type, limit_price=final_limit_price,
+                product_type=product_type_enum,
+            )
     except Exception as e:
         log.error("place_trade_order failed for uid=%s symbol=%s: %s", uid, symbol, e)
         return {"ok": False, "error": str(e)}
@@ -536,7 +588,7 @@ def get_macro_indicators() -> dict:
 # app doesn't recompute any of that, it just calls out to it and passes the
 # result through.
 PATHSENSE_API_BASE = os.environ.get(
-    "PATHSENSE_API_BASE", "https://pathsense-api-779524765901.us-central1.run.app"
+    "PATHSENSE_API_BASE", "https://pathsense-api-ihonrbzu7q-uc.a.run.app"
 )
 
 
@@ -731,6 +783,21 @@ def get_safe_route(source: str, destination: str) -> dict:
 # Groq/OpenAI-format function-calling schemas, keyed by tool name so agents
 # can declare which ones they're allowed to use via SimpleAgent.tools.
 TOOL_SCHEMAS = {
+    "get_safe_route": {
+        "type": "function",
+        "function": {
+            "name": "get_safe_route",
+            "description": "Calculate a safety-scored driving route between two locations using PathSense. Returns turn-by-turn directions, duration, distance, risk band, and best departure time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "description": "The origin location for the trip"},
+                    "destination": {"type": "string", "description": "The destination location for the trip"}
+                },
+                "required": ["source", "destination"]
+            }
+        }
+    },
     "get_market_data": {
         "type": "function",
         "function": {
@@ -967,13 +1034,13 @@ TOOL_SCHEMAS = {
         "function": {
             "name": "place_trade_order",
             "description": (
-                "Places a real order in the signed-in user's own trading account — PAPER (simulated, "
-                "default) or LIVE (real money, via their connected Angel One account). ONLY call this "
-                "after the user has explicitly confirmed a SPECIFIC trade (symbol, side, quantity) you "
-                "already proposed in your immediately preceding message — never speculatively, and never "
-                "infer LIVE mode unless the user explicitly said 'live'/'real money' for this trade. If "
-                "the order can't be placed for insufficient balance, this returns insufficient_funds=true "
-                "with the amounts — relay that plainly to the user rather than retrying automatically."
+                "Places a real LIVE order in the signed-in user's own trading account "
+                "(via their connected Angel One account). ONLY call this "
+                "after the user has explicitly confirmed a SPECIFIC trade (symbol, side, quantity, "
+                "product_type, and execution style) you already proposed in your immediately preceding "
+                "message — never speculatively. If the order can't be placed for insufficient balance, "
+                "this returns insufficient_funds=true with the amounts — relay that plainly to the user "
+                "rather than retrying automatically."
             ),
             "parameters": {
                 "type": "object",
@@ -982,11 +1049,32 @@ TOOL_SCHEMAS = {
                     "exchange": {"type": "string", "description": "'NSE' or 'BSE' (default NSE)"},
                     "side": {"type": "string", "description": "'BUY' or 'SELL'"},
                     "quantity": {"type": "number", "description": "Number of shares"},
-                    "order_type": {"type": "string", "description": "'MARKET' (default) or 'LIMIT'"},
+                    "order_type": {"type": "string", "description": "'MARKET' (default) or 'LIMIT', for a plain (non-algo) order"},
                     "limit_price": {"type": "number", "description": "Required if order_type is LIMIT"},
-                    "mode": {"type": "string", "description": "'PAPER' (default, simulated) or 'LIVE' (real money) — only use LIVE if the user explicitly said so for this trade"}
+                    "product_type": {
+                        "type": "string",
+                        "description": (
+                            "'INTRADAY' or 'DELIVERY' — MUST be asked and confirmed with the user before "
+                            "calling this tool, never defaulted silently. INTRADAY is squared off same-day; "
+                            "DELIVERY takes actual delivery into the demat account."
+                        )
+                    },
+                    "algo_type": {
+                        "type": "string",
+                        "description": (
+                            "Optional. Set only if the user explicitly chose an execution algorithm: "
+                            "'ICEBERG', 'TWAP', 'VWAP', or 'MOMENTUM_SNIPER'. Omit for a plain market/limit order."
+                        )
+                    },
+                    "clip_size": {"type": "number", "description": "ICEBERG only: visible slice size per child order"},
+                    "price_limit": {"type": "number", "description": "ICEBERG only: cap/floor price the iceberg won't cross"},
+                    "duration_minutes": {"type": "number", "description": "TWAP/VWAP only: time window in minutes to spread the order over"},
+                    "slice_count": {"type": "number", "description": "TWAP only: number of equal slices"},
+                    "breakout_price": {"type": "number", "description": "MOMENTUM_SNIPER only: trigger price to fire the order"},
+                    "stop_loss_price": {"type": "number", "description": "MOMENTUM_SNIPER only: protective stop-loss price once filled"},
+                    "watch_timeout_minutes": {"type": "number", "description": "MOMENTUM_SNIPER only: give up waiting for the trigger after this many minutes (default 30)"}
                 },
-                "required": ["symbol", "side", "quantity"]
+                "required": ["symbol", "side", "quantity", "product_type"]
             }
         }
     }
@@ -1041,6 +1129,10 @@ TOOL_IMPLS = {
         symbol=args.get("symbol", ""), exchange=args.get("exchange", "NSE"),
         side=args.get("side", ""), quantity=args.get("quantity", 0),
         order_type=args.get("order_type", "MARKET"), limit_price=args.get("limit_price"),
-        mode=args.get("mode", "PAPER"),
+        product_type=args.get("product_type", "INTRADAY"), algo_type=args.get("algo_type"),
+        clip_size=args.get("clip_size"), price_limit=args.get("price_limit"),
+        duration_minutes=args.get("duration_minutes"), slice_count=args.get("slice_count"),
+        breakout_price=args.get("breakout_price"), stop_loss_price=args.get("stop_loss_price"),
+        watch_timeout_minutes=args.get("watch_timeout_minutes", 30),
     ),
 }

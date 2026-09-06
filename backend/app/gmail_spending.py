@@ -43,7 +43,11 @@ from .secrets import access_secret_version
 
 log = logging.getLogger(__name__)
 
-GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+GMAIL_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.modify",
+]
 
 # Only UPI/bank debit-alert style mail is in scope — deliberately narrow so
 # this never becomes a general "read all my email" feature. Extend this list
@@ -482,3 +486,20 @@ def get_monthly_spending_summary(uid: str, month: str | None = None) -> dict:
             ],
         })
     return {"months": result}
+
+
+def send_gmail(uid: str, to: str, subject: str, html_body: str, thread_id: str | None = None) -> None:
+    from email.message import EmailMessage
+    
+    msg = EmailMessage()
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(html_body, subtype="html")
+    
+    raw_msg = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+    body = {"raw": raw_msg}
+    if thread_id:
+        body["threadId"] = thread_id
+        
+    client = _get_gmail_client(uid)
+    client.users().messages().send(userId="me", body=body).execute()

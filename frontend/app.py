@@ -1001,8 +1001,18 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                 st.session_state.pending_cfa_query = None
                 st.session_state.voice_history.append({"role": "user", "text": _pending})
                 st.session_state.pending_prompt_text = _pending
-                st.rerun(scope="fragment")
+                try:
+                    st.rerun(scope="fragment")
+                except Exception:
+                    st.rerun()
     
+            # ── Chat Controls ──
+            col_controls1, col_controls2 = st.columns([8, 1])
+            with col_controls2:
+                if st.button("🗑️ Clear", key="clear_chat_btn", help="Clear chat history"):
+                    st.session_state.voice_history = []
+                    st.rerun()
+
             # ── Scrollable message history ──
             with st.container(height=500, border=False):
                 if not st.session_state.voice_history:
@@ -1085,7 +1095,8 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                             st.markdown(f'<audio controls autoplay style="width:100%;height:36px;border-radius:4px;"><source src="data:audio/mp3;base64,{msg["audio"]}" type="audio/mp3"></audio>', unsafe_allow_html=True)
                             
                         _route = msg.get("route")
-                        if _route and _route.get("source") and _route.get("destination"):
+                        if isinstance(_route, dict) and _route.get("source") and _route.get("destination"):
+                            from urllib.parse import quote
                             _src_q = quote(_route["source"])
                             _dst_q = quote(_route["destination"])
                             _embed_url = f"https://www.google.com/maps?saddr={_src_q}&daddr={_dst_q}&output=embed"
@@ -1095,7 +1106,7 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
     </div>
     """, height=286)
     
-                        _snap = _route.get("snapshot") if _route else None
+                        _snap = _route.get("snapshot") if isinstance(_route, dict) else None
                         if _snap:
                             def _fmt(v, suffix="", prefix="", decimals=2):
                                 if v is None: return "—"
@@ -1133,7 +1144,7 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                             '''), unsafe_allow_html=True)
 
     
-                        _peers = _route.get("peers") if _route else None
+                        _peers = _route.get("peers") if isinstance(_route, dict) else None
                         if _peers and _peers.get("peers"):
                             st.caption(f'**PEERS IN {html.escape(str(_peers.get("sector") or "")).upper()}**')
                             _rows = [_peers["target"]] + _peers["peers"]
@@ -1277,14 +1288,20 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                             finally:
                                 st.session_state.pending_prompt_text = None
                                 st.session_state.pending_audio_b64 = None
-                                st.rerun(scope="fragment")
+                                try:
+                                    st.rerun(scope="fragment")
+                                except Exception:
+                                    st.rerun()
     
             # ── Text input ──
             user_query = st.chat_input("Ask your Daily Productivity Assistant...", key="bot_chat_input")
             if user_query:
                 st.session_state.voice_history.append({"role": "user", "text": user_query})
                 st.session_state.pending_prompt_text = user_query
-                st.rerun(scope="fragment")
+                try:
+                    st.rerun(scope="fragment")
+                except Exception:
+                    st.rerun()
     
             # ── Voice input (mic) ──
             mic_audio = st.audio_input("Or ask by voice", key="cfa_mic_input")
@@ -1296,5 +1313,8 @@ if _daily_agent_enabled and st.session_state.cfa_panel_open:
                     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
                     st.session_state.voice_history.append({"role": "user", "text": "(voice message)"})
                     st.session_state.pending_audio_b64 = audio_b64
-                    st.rerun(scope="fragment")
+                    try:
+                        st.rerun(scope="fragment")
+                    except Exception:
+                        st.rerun()
     render_cfa_panel()

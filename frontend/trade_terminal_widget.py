@@ -224,10 +224,7 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
                         st.error(f"Error connecting to backend: {e}")
         return
 
-    live_toggle = st.checkbox("⚠️ Go LIVE — place real orders through Angel One (unchecked = paper trade)", value=False, key="tt_live_toggle")
-    mode = "LIVE" if live_toggle else "PAPER"
-    if live_toggle:
-        st.warning("LIVE mode places real orders with real money through your Angel One account.")
+    mode = "LIVE"
 
     # ── Wallet balance ──────────────────────────────────────────────────
     # Available cash for the CURRENT mode — the paper simulator's virtual
@@ -238,8 +235,7 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
     @st.cache_data(ttl=15)
     def fetch_funds(_mode: str):
         try:
-            r = requests.get(f"{backend_url}/api/trading/funds", params={"mode": _mode},
-                              headers=auth_headers(), timeout=15)
+            r = requests.get(f"{backend_url}/api/trading/funds", headers=auth_headers(), timeout=15)
             return r.json() if r.status_code == 200 else {"ok": False, "error": r.text}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -268,8 +264,10 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
             fetch_funds.clear()
             st.rerun()
 
+    st.session_state.setdefault("tt_product_type", "Intraday")
+
     with st.container(border=True):
-        row = st.columns([2.6, 1, 1.1, 1, 1])
+        row = st.columns([2.2, 0.9, 1, 1, 1.1])
 
         from st_keyup import st_keyup
         
@@ -314,14 +312,31 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
                 key="tt_exchange_select",
             )
             st.session_state["tt_exchange"] = exchange
-            
-        with row[2]:
-            qty_val = st.number_input("Shares", min_value=1, value=10, step=1, label_visibility="collapsed", key="tt_qty_input")
-        
-        with row[3]:
-            amt_val = st.number_input("Amount (₹)", min_value=0.0, value=0.0, step=1000.0, label_visibility="collapsed", key="tt_amt_input", help="If > 0, overrides Shares by calculating quantity from live price")
 
-        st.caption(f"Selected: **{st.session_state['tt_symbol']}** ({st.session_state['tt_exchange']}) — {st.session_state['tt_symbol_label']}")
+        with row[2]:
+            product_type_label = st.selectbox(
+                "Product", ["Intraday", "Delivery"], label_visibility="collapsed",
+                index=["Intraday", "Delivery"].index(st.session_state["tt_product_type"]),
+                key="tt_product_type_select",
+            )
+            st.session_state["tt_product_type"] = product_type_label
+        product_type = "INTRADAY" if product_type_label == "Intraday" else "DELIVERY"
+
+        with row[3]:
+            input_mode = st.radio("Mode", ["Shares", "Amount"], horizontal=True, label_visibility="collapsed", key="tt_input_mode")
+        
+        with row[4]:
+            if input_mode == "Shares":
+                qty_val = st.number_input("Shares", min_value=1, value=10, step=1, label_visibility="collapsed", key="tt_qty_input")
+                amt_val = 0.0
+            else:
+                amt_val = st.number_input("Amount (₹)", min_value=0.0, value=0.0, step=1000.0, label_visibility="collapsed", key="tt_amt_input")
+                qty_val = 1 # Fallback, calculated below based on amt_val
+
+        st.caption(
+            f"Selected: **{st.session_state['tt_symbol']}** ({st.session_state['tt_exchange']}) — "
+            f"{st.session_state['tt_symbol_label']} · **{product_type_label}**"
+        )
 
         @st.cache_data(ttl=60)
         def fetch_snapshot(ticker: str):
@@ -444,7 +459,7 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
                 "exchange": st.session_state["tt_exchange"],
                 "side": side,
                 "total_quantity": calculated_qty,
-                "mode": mode,
+                "product_type": product_type,
             }
             for k, v in algo_params.items():
                 body[k] = _clean(v) if k in ("price_limit", "stop_loss_price", "breakout_price") else v
@@ -457,7 +472,7 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
                 "quantity": calculated_qty,
                 "order_type": "LIMIT" if limit_price > 0 else "MARKET",
                 "limit_price": _clean(limit_price),
-                "mode": mode,
+                "product_type": product_type,
             }
             return "manual", body
 
@@ -545,11 +560,13 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
         reasoning = f"Manual · {o.get('order_type', '')}"
         if o.get("limit_price"):
             reasoning += f" @ ₹{o.get('limit_price')}"
+        if o.get("product_type"):
+            reasoning += f" · {o.get('product_type')}"
         reasoning += f" · {o.get('status', '')}"
         log_rows.append({
             "time": ts, "symbol": o.get("symbol", ""), "side": o.get("side", ""),
             "exchange": o.get("exchange", "—"),
-            "broker": "Angel One" if o.get("mode") == "LIVE" else "Paper",
+            "broker": "Angel One",
             "reasoning": reasoning,
         })
 
@@ -558,13 +575,14 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
         if ts[:10] != today_str:
             continue
         reasoning = (
-            f"Auto · {a.get('algo_type', '')} · {a.get('status', '')} "
+            f"Auto · {a.get('algo_type', '')}"
+            f"{' · ' + a['product_type'] if a.get('product_type') else ''} · {a.get('status', '')} "
             f"({a.get('total_filled', 0)}/{a.get('total_quantity', 0)} filled)"
         )
         log_rows.append({
             "time": ts, "symbol": a.get("symbol", ""), "side": a.get("side", ""),
             "exchange": a.get("exchange", "—"),
-            "broker": "Angel One" if a.get("mode") == "LIVE" else "Paper",
+            "broker": "Angel One",
             "reasoning": reasoning,
         })
 
@@ -596,12 +614,11 @@ def render_trade_terminal(backend_url: str, show_title: bool = True):
             )
 
     with st.expander("Positions"):
-        pos_mode = st.radio("Positions from", ["PAPER", "LIVE"], horizontal=True, key="tt_pos_mode")
         if st.button("Fetch positions", key="tt_fetch_positions"):
             try:
                 r = requests.get(
                     f"{backend_url}/api/trading/positions",
-                    params={"mode": pos_mode}, headers=auth_headers(), timeout=20,
+                    headers=auth_headers(), timeout=20,
                 )
                 if r.status_code == 200:
                     st.dataframe(r.json())

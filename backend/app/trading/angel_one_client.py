@@ -51,24 +51,48 @@ class AngelOneClient(BrokerClient):
         self._totp_secret = totp_secret
         self._conn: Optional[SmartConnect] = None
         self._feed_token: Optional[str] = None
-        # A minimal in-process symbol->token cache. Angel One requires the
-        # numeric instrument token (not the trading symbol) for every call,
-        # sourced from their published instrument master. Populate via
-        # `load_instrument(symbol, exchange, token)` at startup, or plug in
-        # the instrument-master CSV lookup here.
+        # A minimal in-process symbol->(token, tradingsymbol) cache. Angel One
+        # requires the numeric instrument token (not the trading symbol) for
+        # every call, sourced from their published instrument master.
+        # Populate via `load_instrument(symbol, exchange, token)` at startup,
+        # or plug in the instrument-master CSV lookup here.
+        #
+        # NOTE: Angel One's instrument master keys cash-equity rows by a
+        # `symbol` field that carries a "-EQ" suffix (e.g. "RELIANCE-EQ"),
+        # while the plain ticker a person or an LLM tool call would naturally
+        # use (e.g. "RELIANCE") only appears in that row's `name` field. This
+        # cache is indexed under BOTH forms so a bare-ticker lookup succeeds,
+        # while `_resolve()` still returns the real Angel One tradingsymbol
+        # ("RELIANCE-EQ") for the actual API calls, since Angel One rejects
+        # the bare name there.
         self._instrument_tokens: dict[str, str] = {}
+        self._tradingsymbols: dict[str, str] = {}
 
     def load_instrument(self, symbol: str, exchange: str, token: str):
-        self._instrument_tokens[f"{exchange}:{symbol}"] = token
+        key = f"{exchange}:{symbol}"
+        self._instrument_tokens[key] = token
+        self._tradingsymbols[key] = symbol
+
+    def _resolve(self, symbol: str, exchange: str) -> tuple[str, str]:
+        """Returns (angel_one_tradingsymbol, instrument_token) for a
+        user/agent-supplied symbol, tolerating both the bare ticker
+        ("RELIANCE") and the full Angel One tradingsymbol ("RELIANCE-EQ")."""
+        symbol = (symbol or "").strip().upper()
+        candidates = [symbol]
+        if not symbol.endswith("-EQ"):
+            candidates.append(f"{symbol}-EQ")
+        for candidate in candidates:
+            key = f"{exchange}:{candidate}"
+            token = self._instrument_tokens.get(key)
+            if token:
+                return self._tradingsymbols.get(key, candidate), token
+        raise BrokerError(
+            f"No instrument token cached for {exchange}:{symbol}. Load the Angel One "
+            f"instrument master and call load_instrument() before trading it."
+        )
 
     def _token_for(self, symbol: str, exchange: str) -> str:
-        key = f"{exchange}:{symbol}"
-        token = self._instrument_tokens.get(key)
-        if not token:
-            raise BrokerError(
-                f"No instrument token cached for {key}. Load the Angel One "
-                f"instrument master and call load_instrument() before trading it."
-            )
+        _tradingsymbol, token = self._resolve(symbol, exchange)
         return token
 
     async def connect(self):
@@ -95,7 +119,23 @@ class AngelOneClient(BrokerClient):
             with urllib.request.urlopen(req) as resp:
                 data = json.load(resp)
                 for item in data:
-                    self._instrument_tokens[f"{item['exch_seg']}:{item['symbol']}"] = item["token"]
+                    exch = item["exch_seg"]
+                    trading_symbol = item["symbol"]
+                    token = item["token"]
+                    full_key = f"{exch}:{trading_symbol}"
+                    self._instrument_tokens[full_key] = token
+                    self._tradingsymbols[full_key] = trading_symbol
+                    # Cash-equity rows (no expiry/strike, i.e. instrumenttype
+                    # is blank) also get indexed under their bare `name`
+                    # ("RELIANCE") so lookups with the plain ticker resolve
+                    # too — see the cache docstring above. setdefault() so a
+                    # name collision (rare, but e.g. index/derivative rows
+                    # can share a name) never clobbers an equity row already
+                    # indexed this way.
+                    if not item.get("instrumenttype") and item.get("name"):
+                        alias_key = f"{exch}:{item['name']}"
+                        self._instrument_tokens.setdefault(alias_key, token)
+                        self._tradingsymbols.setdefault(alias_key, trading_symbol)
             logger.info(f"Loaded {len(self._instrument_tokens)} instrument tokens.")
             
             return conn, feed_token
@@ -115,10 +155,10 @@ class AngelOneClient(BrokerClient):
 
     async def get_quote(self, symbol: str, exchange: str) -> Quote:
         conn = self._require_conn()
-        token = self._token_for(symbol, exchange)
+        tradingsymbol, token = self._resolve(symbol, exchange)
 
         def _fetch():
-            return conn.ltpData(exchange, symbol, token)
+            return conn.ltpData(exchange, tradingsymbol, token)
 
         resp = await asyncio.to_thread(_fetch)
         if not resp.get("status"):
@@ -128,16 +168,16 @@ class AngelOneClient(BrokerClient):
 
     async def place_order(self, order: OrderRequest) -> OrderResult:
         conn = self._require_conn()
-        token = self._token_for(order.symbol, order.exchange)
+        tradingsymbol, token = self._resolve(order.symbol, order.exchange)
 
         order_params = {
             "variety": "NORMAL",
-            "tradingsymbol": order.symbol,
+            "tradingsymbol": tradingsymbol,
             "symboltoken": token,
             "transactiontype": order.side.value,
             "exchange": order.exchange,
             "ordertype": order.order_type.value,
-            "producttype": "INTRADAY",
+            "producttype": order.product_type.value,
             "duration": "DAY",
             "price": str(order.limit_price) if order.limit_price is not None else "0",
             "quantity": str(order.quantity),

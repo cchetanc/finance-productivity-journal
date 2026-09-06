@@ -23,6 +23,14 @@ class OrderType(str, Enum):
     LIMIT = "LIMIT"
 
 
+class ProductType(str, Enum):
+    """Angel One 'producttype' — whether a position is squared off by the
+    broker at end-of-day (INTRADAY, margin-funded) or actually taken
+    delivery of / held in the demat account (DELIVERY, aka CNC)."""
+    INTRADAY = "INTRADAY"
+    DELIVERY = "DELIVERY"
+
+
 class OrderStatus(str, Enum):
     PENDING = "PENDING"
     OPEN = "OPEN"
@@ -40,6 +48,7 @@ class OrderRequest:
     quantity: int
     order_type: OrderType
     limit_price: Optional[float] = None
+    product_type: ProductType = ProductType.INTRADAY
     # tag used to correlate child orders back to a parent algo execution
     client_order_tag: Optional[str] = None
 

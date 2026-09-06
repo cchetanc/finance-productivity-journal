@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import AsyncIterator, Optional
 
-from .broker_base import BrokerClient, OrderRequest, OrderSide, OrderType
+from .broker_base import BrokerClient, OrderRequest, OrderSide, OrderType, ProductType
 
 
 class AlgoType(str, Enum):
@@ -36,6 +36,7 @@ class AlgoParams:
     exchange: str
     side: OrderSide
     total_quantity: int
+    product_type: ProductType = ProductType.INTRADAY  # INTRADAY (squared off same day) or DELIVERY
 
     # Iceberg
     clip_size: Optional[int] = None            # visible slice size per child order
@@ -95,6 +96,7 @@ class LimitStrategy(Strategy):
             side=self.params.side,
             quantity=self.params.total_quantity,
             order_type=OrderType.LIMIT,
+            product_type=self.params.product_type,
             limit_price=self.params.price_limit,
         )
 
@@ -131,6 +133,7 @@ class IcebergStrategy(Strategy):
                 side=self.params.side,
                 quantity=qty,
                 order_type=OrderType.LIMIT,
+                product_type=self.params.product_type,
                 limit_price=self.params.price_limit,
                 client_order_tag=f"ICEBERG-{i}",
             )
@@ -178,6 +181,7 @@ class TWAPStrategy(Strategy):
                 side=self.params.side,
                 quantity=qty,
                 order_type=OrderType.MARKET,
+                product_type=self.params.product_type,
                 client_order_tag=f"TWAP-{i}",
             )
             if i < len(self._slices()) - 1:
@@ -237,6 +241,7 @@ class VWAPStrategy(Strategy):
                 side=self.params.side,
                 quantity=qty,
                 order_type=OrderType.MARKET,
+                product_type=self.params.product_type,
                 client_order_tag=f"VWAP-{i}",
             )
             if i < len(slices) - 1:
@@ -280,6 +285,7 @@ class MomentumSniperStrategy(Strategy):
                     side=self.params.side,
                     quantity=self.params.total_quantity,
                     order_type=OrderType.MARKET,
+                    product_type=self.params.product_type,
                     client_order_tag="SNIPER-ENTRY",
                 )
                 if self.params.stop_loss_price is not None:
@@ -290,6 +296,7 @@ class MomentumSniperStrategy(Strategy):
                         side=opposite,
                         quantity=self.params.total_quantity,
                         order_type=OrderType.LIMIT,
+                        product_type=self.params.product_type,
                         limit_price=self.params.stop_loss_price,
                         client_order_tag="SNIPER-STOP",
                     )

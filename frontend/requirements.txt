@@ -5,3 +5,4 @@ ephem
 streamlit-js-eval
 streamlit-keyup
 markdown
+extra-streamlit-components

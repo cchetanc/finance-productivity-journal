@@ -8,7 +8,7 @@ from ..auth import get_current_user_uid
 from ..database import list_algo_executions, list_trades
 from ..trading import services as trading_service
 from ..trading.algos import AlgoParams, AlgoType
-from ..trading.broker_base import BrokerError, OrderSide, OrderType
+from ..trading.broker_base import BrokerError, OrderSide, OrderType, ProductType
 from ..trading.credentials import get_angel_one_credentials, save_angel_one_credentials, AngelOneCredentials
 
 logger = logging.getLogger("trading.router")
@@ -69,12 +69,11 @@ async def broker_status():
 # ---------------------------------------------------------------------------
 
 @router.get("/funds")
-async def get_funds(mode: str = "PAPER", uid: str = Depends(get_current_user_uid)):
-    """Available balance in the active wallet — the PAPER simulator's virtual
-    cash, or the real Angel One account's available margin (via SmartAPI's
-    rmsLimit()) when mode=LIVE. Used by the Trade Terminal's balance header
+async def get_funds(uid: str = Depends(get_current_user_uid)):
+    """Available balance in the active wallet — the real Angel One account's available margin (via SmartAPI's
+    rmsLimit()). Used by the Trade Terminal's balance header
     and by the agent's pre-trade insufficient-funds check."""
-    return await trading_service.get_funds_dict(uid, mode=mode)
+    return await trading_service.get_funds_dict(uid)
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +87,7 @@ class PlaceOrderRequest(BaseModel):
     quantity: int
     order_type: OrderType = OrderType.LIMIT
     limit_price: Optional[float] = None
-    mode: str = Field("PAPER", description="'LIVE' or 'PAPER'")
+    product_type: ProductType = ProductType.INTRADAY
 
 
 @router.post("/orders")
@@ -96,7 +95,7 @@ async def place_order(body: PlaceOrderRequest, uid: str = Depends(get_current_us
     result = await trading_service.place_simple_order(
         uid, symbol=body.symbol, exchange=body.exchange, side=body.side,
         quantity=body.quantity, order_type=body.order_type, limit_price=body.limit_price,
-        mode=body.mode,
+        product_type=body.product_type,
     )
     if not result.get("ok"):
         status_code = 400 if result.get("insufficient_funds") else 502
@@ -114,7 +113,7 @@ class StartAlgoRequest(BaseModel):
     exchange: str = "NSE"
     side: OrderSide
     total_quantity: int
-    mode: str = Field("PAPER", description="'LIVE' or 'PAPER' — defaults to PAPER for safety")
+    product_type: ProductType = ProductType.INTRADAY
 
     clip_size: Optional[int] = None
     price_limit: Optional[float] = None
@@ -129,6 +128,7 @@ class StartAlgoRequest(BaseModel):
 def _params_from_request(body: StartAlgoRequest) -> AlgoParams:
     return AlgoParams(
         symbol=body.symbol, exchange=body.exchange, side=body.side, total_quantity=body.total_quantity,
+        product_type=body.product_type,
         clip_size=body.clip_size, price_limit=body.price_limit,
         duration_minutes=body.duration_minutes, slice_count=body.slice_count,
         breakout_price=body.breakout_price, stop_loss_price=body.stop_loss_price,
@@ -150,19 +150,19 @@ def preview_algo(body: StartAlgoRequest):
 
 @router.post("/algo/start")
 async def start_algo(body: StartAlgoRequest, uid: str = Depends(get_current_user_uid)):
-    engine = await trading_service.get_engine(uid, body.mode)
+    engine = await trading_service.get_engine(uid)
     params = _params_from_request(body)
     try:
-        execution = await engine.start(uid, body.algo_type, params, mode=body.mode)
+        execution = await engine.start(uid, body.algo_type, params)
     except Exception as e:  # noqa: BLE001 - includes RiskLimitError / InsufficientFundsError
         raise HTTPException(status_code=400, detail=str(e)) from e
     return execution.to_dict()
 
 
 @router.get("/algo/{execution_id}")
-async def get_algo_status(execution_id: str, mode: str = "PAPER", uid: str = Depends(get_current_user_uid)):
+async def get_algo_status(execution_id: str, uid: str = Depends(get_current_user_uid)):
     from ..database import db
-    engine = trading_service._live_engines.get(uid) if mode == "LIVE" else trading_service.paper_engine
+    engine = trading_service._live_engines.get(uid)
     execution = engine.get(execution_id) if engine else None
     if not execution:
         # Fall back to Firestore in case this process didn't run it (e.g.
@@ -175,8 +175,8 @@ async def get_algo_status(execution_id: str, mode: str = "PAPER", uid: str = Dep
 
 
 @router.post("/algo/{execution_id}/stop")
-async def stop_algo(execution_id: str, mode: str = "PAPER", uid: str = Depends(get_current_user_uid)):
-    engine = trading_service._live_engines.get(uid) if mode == "LIVE" else trading_service.paper_engine
+async def stop_algo(execution_id: str, uid: str = Depends(get_current_user_uid)):
+    engine = trading_service._live_engines.get(uid)
     if not engine or not engine.stop(execution_id):
         raise HTTPException(status_code=404, detail="Execution not found or already finished")
     return {"message": "Stop requested."}
@@ -195,8 +195,8 @@ def get_order_history(uid: str = Depends(get_current_user_uid)):
 
 
 @router.get("/positions")
-async def get_positions(mode: str = "PAPER", uid: str = Depends(get_current_user_uid)):
-    engine = await trading_service.get_engine(uid, mode)
+async def get_positions(uid: str = Depends(get_current_user_uid)):
+    engine = await trading_service.get_engine(uid)
     try:
         return await engine.broker.get_positions()
     except BrokerError as e:

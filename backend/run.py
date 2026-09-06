@@ -1,15 +1,13 @@
 from fastapi import FastAPI
 from app import auth, database, models, gemini, sentiment
 from app.routers import (
-    market, journals, screener, mutual_funds, corporate_actions, trading, hotels, gmail,
+    market, journals, screener, mutual_funds, corporate_actions, trading, hotels, gmail, admin, auth, reports
 )
-from app.routers import auth as auth_router
-from app.routers import admin as admin_router
 
 app = FastAPI(title="Finance Productivity Journal API")
 
-app.include_router(auth_router.router)
-app.include_router(admin_router.router)
+app.include_router(auth.router)
+app.include_router(admin.router)
 app.include_router(market.router)
 app.include_router(journals.router)
 app.include_router(screener.router)
@@ -18,6 +16,7 @@ app.include_router(corporate_actions.router)
 app.include_router(trading.router)
 app.include_router(hotels.router)
 app.include_router(gmail.router)
+app.include_router(reports.router)
 
 
 @app.on_event("startup")

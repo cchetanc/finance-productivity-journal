@@ -39,10 +39,44 @@ import time
 
 import requests
 import streamlit as st
+import extra_streamlit_components as stx
 
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "firebase_config.json")
 ALLOWED_EMAIL_DOMAIN = "gmail.com"
 _SPECIAL_CHARS = r"""!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?"""
+
+# Firebase Identity Toolkit returns machine-readable codes (e.g.
+# "INVALID_LOGIN_CREDENTIALS") inside a {"error": {...}} JSON body on
+# failure. Left unhandled, that raw JSON blob — nested objects, an
+# "errors" array, numeric codes and all — used to get dumped straight
+# onto the sign-in page as the error message. This maps the codes we're
+# likely to see to plain English instead.
+_FRIENDLY_ERRORS = {
+    "EMAIL_NOT_FOUND": "No account found with that email.",
+    "INVALID_PASSWORD": "Incorrect password.",
+    "INVALID_LOGIN_CREDENTIALS": "Incorrect email or password.",
+    "USER_DISABLED": "This account has been disabled.",
+    "TOO_MANY_ATTEMPTS_TRY_LATER": "Too many failed attempts. Please wait a bit and try again.",
+    "EMAIL_EXISTS": "An account with this email already exists — use the Sign in tab.",
+    "OPERATION_NOT_ALLOWED": "Email/password sign-in isn't enabled for this project.",
+    "INVALID_EMAIL": "That doesn't look like a valid email address.",
+    "WEAK_PASSWORD": "Password is too weak.",
+    "CREDENTIAL_TOO_OLD_LOGIN_AGAIN": "Your session is too old — please sign in again.",
+}
+
+
+def _describe_error(error_msg: str) -> str:
+    """Turn whatever _sign_in/_sign_up/_refresh returned as an error into
+    one short, human-readable line. `error_msg` is either a plain-English
+    string we wrote ourselves (missing API key, network failure) or the
+    raw JSON body Firebase's REST API sent back — in which case we pull
+    out just the error code and translate it."""
+    try:
+        payload = json.loads(error_msg)
+        code = payload.get("error", {}).get("message", "")
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return error_msg  # already a plain-English message
+    return _FRIENDLY_ERRORS.get(code, f"Sign-in failed ({code or 'unknown error'}).")
 
 # Mirrors backend/app/routers/auth.py's DEFAULT_FEATURES — used only as a
 # client-side fallback before /api/auth/provision has returned (or if it
@@ -55,6 +89,13 @@ DEFAULT_FEATURES = {
     "smart_investor": False,
 }
 
+from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+def get_cookie_manager():
+    ctx = get_script_run_ctx()
+    if not hasattr(ctx, "cookie_manager"):
+        ctx.cookie_manager = stx.CookieManager(key="auth_cookies")
+    return ctx.cookie_manager
 
 @st.cache_data(ttl=3600)
 def _load_firebase_api_key() -> str | None:
@@ -98,11 +139,14 @@ def _sign_in(email: str, password: str) -> tuple[dict | None, str | None]:
     api_key = _load_firebase_api_key()
     if not api_key:
         return None, "API Key missing"
-    resp = requests.post(
-        f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}",
-        json={"email": email, "password": password, "returnSecureToken": True},
-        timeout=15,
-    )
+    try:
+        resp = requests.post(
+            f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}",
+            json={"email": email, "password": password, "returnSecureToken": True},
+            timeout=15,
+        )
+    except requests.RequestException:
+        return None, "Couldn't reach the sign-in service. Check your connection and try again."
     if resp.status_code != 200:
         return None, resp.text
     return resp.json(), None
@@ -116,11 +160,14 @@ def _sign_up(email: str, password: str) -> tuple[dict | None, str | None]:
     api_key = _load_firebase_api_key()
     if not api_key:
         return None, "API Key missing"
-    resp = requests.post(
-        f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={api_key}",
-        json={"email": email, "password": password, "returnSecureToken": True},
-        timeout=15,
-    )
+    try:
+        resp = requests.post(
+            f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={api_key}",
+            json={"email": email, "password": password, "returnSecureToken": True},
+            timeout=15,
+        )
+    except requests.RequestException:
+        return None, "Couldn't reach the sign-up service. Check your connection and try again."
     if resp.status_code != 200:
         return None, resp.text
     return resp.json(), None
@@ -130,11 +177,14 @@ def _refresh(refresh_token: str) -> dict | None:
     api_key = _load_firebase_api_key()
     if not api_key:
         return None
-    resp = requests.post(
-        f"https://securetoken.googleapis.com/v1/token?key={api_key}",
-        data={"grant_type": "refresh_token", "refresh_token": refresh_token},
-        timeout=15,
-    )
+    try:
+        resp = requests.post(
+            f"https://securetoken.googleapis.com/v1/token?key={api_key}",
+            data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+            timeout=15,
+        )
+    except requests.RequestException:
+        return None
     if resp.status_code != 200:
         return None
     data = resp.json()
@@ -152,9 +202,35 @@ def is_logged_in() -> bool:
 def get_id_token() -> str | None:
     """Returns a valid ID token, transparently refreshing it if it's
     expired or about to expire. Returns None if not logged in."""
+    # logout() just ran in this session: don't fall back to reading cookies
+    # below, since CookieManager's delete() is applied via a browser-side
+    # component round-trip that hasn't necessarily completed yet — reading
+    # cm.get() right after can still return the stale, not-yet-deleted
+    # cookie value and silently "restore" the session that was just signed
+    # out of. This flag is cleared as soon as a fresh sign-in/sign-up sets
+    # fb_id_token directly (see login_widget below).
+    if st.session_state.get("_signed_out"):
+        return None
+
+    cm = get_cookie_manager()
     token = st.session_state.get("fb_id_token")
+    
+    if not token:
+        # Try to restore from cookies on hard refresh
+        cookie_token = cm.get("fb_id_token")
+        if cookie_token:
+            st.session_state["fb_id_token"] = cookie_token
+            st.session_state["fb_refresh_token"] = cm.get("fb_refresh_token")
+            st.session_state["fb_token_expiry"] = float(cm.get("fb_token_expiry") or 0)
+            st.session_state["fb_email"] = cm.get("fb_email")
+            st.session_state["fb_role"] = cm.get("fb_role") or "user"
+            
+            # Since features is a dict, we might need to eval it if it was stringified, or just skip it and let it re-provision
+            token = cookie_token
+            
     if not token:
         return None
+        
     if time.time() >= st.session_state.get("fb_token_expiry", 0):
         refreshed = _refresh(st.session_state["fb_refresh_token"])
         if not refreshed:
@@ -164,6 +240,12 @@ def get_id_token() -> str | None:
         st.session_state["fb_refresh_token"] = refreshed["refreshToken"]
         st.session_state["fb_token_expiry"] = time.time() + int(refreshed["expiresIn"]) - 60
         token = st.session_state["fb_id_token"]
+        
+        # Update cookies with new tokens
+        cm.set("fb_id_token", st.session_state["fb_id_token"], key="set_id_token_ref")
+        cm.set("fb_refresh_token", st.session_state["fb_refresh_token"], key="set_refresh_token_ref")
+        cm.set("fb_token_expiry", str(st.session_state["fb_token_expiry"]), key="set_token_expiry_ref")
+        
     return token
 
 
@@ -172,11 +254,62 @@ def auth_headers() -> dict:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+# Only these five are ever actually written to a browser cookie (see the
+# cm.set(...) calls in login_widget() and get_id_token() below) — the rest
+# are plain session_state bookkeeping with no cookie counterpart.
+_COOKIE_KEYS = ("fb_id_token", "fb_refresh_token", "fb_token_expiry", "fb_email", "fb_role")
+_SESSION_ONLY_KEYS = ("fb_provisioned", "fb_features", "voice_history", "chat_loaded_date", "cfa_persona")
+
+
 def logout():
-    for k in ("fb_id_token", "fb_refresh_token", "fb_token_expiry", "fb_email",
-              "fb_role", "fb_provisioned", "fb_features", "voice_history",
-              "chat_loaded_date", "cfa_persona"):
+    """Requests sign-out. The actual work happens in
+    _finish_logout_if_requested(), called from login_widget() on the very
+    next run — see that function's docstring for why this is split in two
+    steps instead of doing it all here immediately."""
+    st.session_state["_logout_requested"] = True
+
+
+def _finish_logout_if_requested():
+    """Step 1 (first run after logout()): issue the cookie deletions and
+    rerun once more, while the app still looks/behaves as signed-in (we
+    haven't touched session_state yet). Step 2 (the run after that): the
+    delete calls have now had a full, uninterrupted render to complete, so
+    it's safe to actually clear session_state and flip to signed-out.
+
+    This two-step handoff exists because CookieManager.delete() runs
+    through a Streamlit custom component — an async, iframe-based round
+    trip. Deleting the cookies and immediately st.rerun()-ing into a
+    completely different page (as this used to do in one step) could
+    swap that page in before the delete iframes finished, so a stale
+    fb_id_token cookie occasionally survived and silently restored the
+    old session on the next load — which is what made Sign out feel like
+    it needed several clicks to actually take. Call this once, near the
+    top of every page (login_widget() already does), before anything else
+    reads is_logged_in()."""
+    if not st.session_state.get("_logout_requested"):
+        return
+
+    if not st.session_state.get("_logout_cookies_cleared"):
+        cm = get_cookie_manager()
+        for k in _COOKIE_KEYS:
+            try:
+                cm.delete(k, key=f"del_{k}")
+            except KeyError:
+                # CookieManager raises if the cookie was never set client-side
+                # (e.g. never restored this session) — deletion is a no-op then.
+                pass
+        st.session_state["_logout_cookies_cleared"] = True
+        st.rerun()
+
+    for k in (*_COOKIE_KEYS, *_SESSION_ONLY_KEYS):
         st.session_state.pop(k, None)
+    st.session_state.pop("_logout_requested", None)
+    st.session_state.pop("_logout_cookies_cleared", None)
+    # See get_id_token()'s comment: this makes sign-out take effect
+    # immediately regardless of whether the cookie deletions have finished
+    # propagating to the browser yet.
+    st.session_state["_signed_out"] = True
+    st.rerun()
 
 
 def _provision(backend_url: str):
@@ -235,6 +368,8 @@ def login_widget(backend_url: str = "") -> bool:
     every page — this is the app-wide gate, not just the trade terminal).
     Pass backend_url so the first successful auth can provision the user's
     Firestore profile/role."""
+    _finish_logout_if_requested()
+
     if is_logged_in():
         if backend_url:
             _provision(backend_url)
@@ -259,13 +394,21 @@ def login_widget(backend_url: str = "") -> bool:
             if submitted:
                 data, error_msg = _sign_in(email, password)
                 if data:
+                    st.session_state.pop("_signed_out", None)
                     st.session_state["fb_id_token"] = data["idToken"]
                     st.session_state["fb_refresh_token"] = data["refreshToken"]
                     st.session_state["fb_token_expiry"] = time.time() + int(data["expiresIn"]) - 60
                     st.session_state["fb_email"] = email
+                    
+                    cm = get_cookie_manager()
+                    cm.set("fb_id_token", st.session_state["fb_id_token"], key="set_id_token_li")
+                    cm.set("fb_refresh_token", st.session_state["fb_refresh_token"], key="set_refresh_token_li")
+                    cm.set("fb_token_expiry", str(st.session_state["fb_token_expiry"]), key="set_token_expiry_li")
+                    cm.set("fb_email", email, key="set_email_li")
+                    
                     st.rerun()
                 else:
-                    st.error(f"Sign-in failed. Error from Firebase: {error_msg}")
+                    st.error(_describe_error(error_msg))
 
     with tab_up:
         st.caption(f"Only @{ALLOWED_EMAIL_DOMAIN} addresses can sign up. "
@@ -287,13 +430,19 @@ def login_widget(backend_url: str = "") -> bool:
                 else:
                     data, error_msg = _sign_up(email, password)
                     if data:
+                        st.session_state.pop("_signed_out", None)
                         st.session_state["fb_id_token"] = data["idToken"]
                         st.session_state["fb_refresh_token"] = data["refreshToken"]
                         st.session_state["fb_token_expiry"] = time.time() + int(data["expiresIn"]) - 60
                         st.session_state["fb_email"] = email
+                        
+                        cm = get_cookie_manager()
+                        cm.set("fb_id_token", st.session_state["fb_id_token"], key="set_id_token_su")
+                        cm.set("fb_refresh_token", st.session_state["fb_refresh_token"], key="set_refresh_token_su")
+                        cm.set("fb_token_expiry", str(st.session_state["fb_token_expiry"]), key="set_token_expiry_su")
+                        cm.set("fb_email", email, key="set_email_su")
+                        
                         st.rerun()
-                    elif error_msg and "EMAIL_EXISTS" in error_msg:
-                        st.error("An account with this email already exists — use the Sign in tab.")
                     else:
-                        st.error(f"Sign-up failed. Error from Firebase: {error_msg}")
+                        st.error(_describe_error(error_msg))
     return False

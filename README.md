@@ -48,8 +48,8 @@ right analyst, rather than one generic chatbot bluffing its way through every do
 | 📊 **Equity & Mutual Fund Screener** | Filterable, sortable screens across fundamentals (P/E, ROE, ROCE, margins, growth) and fund categories, with fast type-ahead search. |
 | 📈 **Live, Interactive Charts** | Real TradingView-powered candlestick charts (not static images) embedded directly in chat and on stock pages. |
 | 🧮 **Quant Desk & Breakout Screener** | On-demand quantitative reasoning (Sharpe/Sortino, volatility, VaR) *plus* a real momentum + volume-confirmation breakout screen that surfaces actual shortlisted stocks with numbers, not guesses. |
-| 💰 **Trade Terminal** | Place manual or algorithmic orders (**Iceberg, TWAP, VWAP, Momentum Sniper**) in PAPER (simulated) or LIVE mode via Angel One's SmartAPI, with live wallet-balance display and pre-trade risk/insufficient-funds checks. |
-| 🗣️ **Confirm-to-Trade from Chat** | The AI desk can propose a specific, data-backed trade idea and — only after explicit user confirmation — execute it through the same risk-checked trading engine as the terminal. Defaults to PAPER; never assumes real money without the user saying so. |
+| 💰 **Trade Terminal** | Place manual or algorithmic orders (**Iceberg, TWAP, VWAP, Momentum Sniper**) LIVE via Angel One's SmartAPI, as either an **Intraday** (squared off same day) or **Delivery** (held in your demat account) order, with live wallet-balance display and pre-trade risk/insufficient-funds checks. |
+| 🗣️ **Confirm-to-Trade from Chat** | Ask the assistant to place an order and it walks you through it like a real dealing desk: how many shares (or how much to invest — it converts that to shares at the live price and tells you the leftover balance), Intraday or Delivery, and market price / a specific limit rate / an execution algorithm (Iceberg, TWAP, VWAP, Momentum Sniper). Only fires the real order through the same risk-checked trading engine as the terminal once everything is confirmed. |
 | 📢 **Dividends & Corporate Actions / Results Calendar** | Tracks upcoming dividends, splits, bonuses, and quarterly result dates so nothing is missed. |
 | 💳 **Gmail-based Spending Insights** | Opt-in, read-only parsing of UPI/bank-debit alert emails to summarize real monthly spending — closing the loop between "what I spend" and "what I can invest." |
 | 🌗 **Personal Journal & Voice** | A reflective daily journal with AI replies/summaries, and voice input for hands-free queries. |
@@ -64,9 +64,13 @@ right analyst, rather than one generic chatbot bluffing its way through every do
   domain-specific agents with their own tools and guardrails — closer to how an actual
   research desk operates, and easier to reason about/extend than a single do-everything prompt.
 - **Guardrails are load-bearing, not decorative.** The AI can *recommend* a trade but cannot
-  execute one without an explicit, specific human confirmation; it defaults to simulated
-  (PAPER) money; and every BUY — whether from the terminal or from chat — runs through the same
-  pre-trade insufficient-funds check before it ever reaches the broker.
+  execute one without an explicit, specific human confirmation covering size, product type
+  (Intraday/Delivery), and execution style; every BUY — whether from the terminal or from chat —
+  runs through the same pre-trade insufficient-funds check before it ever reaches the broker; and
+  a per-turn execution lock guarantees a confirmed order is placed **at most once**, even though
+  a single message can be handled by more than one specialist agent in parallel (see §11).
+  All trading is currently against the real, connected Angel One account — there is no
+  simulated/PAPER mode at the moment, so every confirmed order is a real order.
 - **Screens are transparent, not black-box.** The "breakout" screener is explicitly presented
   as a momentum + volume-confirmation heuristic on real cached numbers — not dressed up as a
   guaranteed signal.
@@ -89,7 +93,7 @@ right analyst, rather than one generic chatbot bluffing its way through every do
 │  • Equity / MF Screener        │        │    (Equity · Quant · Macro · Spending · │
 │  • Trade Terminal              │        │     Corp-Actions · Cinema · Travel)     │
 │  • Dividends & Results Calendar│        │    powered by Gemini + tool-calling      │
-│  • Admin panel                 │        │  • Trading Engine (Paper / Angel One)   │
+│  • Admin panel                 │        │  • Trading Engine (Angel One, LIVE)     │
 └──────────────────────────────┘         │  • Screener data pipeline (Firestore)   │
                                           │  • Gmail OAuth + spending parser        │
                                           └───────────────────┬─────────────────────┘
@@ -110,7 +114,7 @@ right analyst, rather than one generic chatbot bluffing its way through every do
 | **AI / Agents** | Google Gemini (`google-genai`) with function/tool calling, custom multi-agent router + synthesizer |
 | **Data & Auth** | Firebase Authentication, Google Cloud Firestore, Google Cloud Secret Manager |
 | **Market Data** | `yfinance`, cached Firestore screener pipeline |
-| **Trading** | Angel One SmartAPI (`smartapi-python`), `pyotp` (TOTP login), custom paper-trading simulator, custom execution engine (Iceberg / TWAP / VWAP / Momentum Sniper algos) |
+| **Trading** | Angel One SmartAPI (`smartapi-python`), `pyotp` (TOTP login), custom execution engine (Iceberg / TWAP / VWAP / Momentum Sniper algos), Intraday/Delivery product-type support |
 | **Integrations** | Gmail API (OAuth, read-only) for spending insights, Google Cloud Speech-to-Text / Text-to-Speech for voice |
 | **Infra** | Deployed on Google Cloud Run |
 
@@ -123,9 +127,11 @@ right analyst, rather than one generic chatbot bluffing its way through every do
    summaries) rather than guessing.
 3. **Explore deeper** via the Equity Screener, Mutual Fund Screener, Dividends & Corporate
    Actions, or Results Calendar pages.
-4. **Act on it** in the Trade Terminal — place a manual order or run an execution algorithm, in
-   PAPER mode to practice risk-free or LIVE mode against a real Angel One account — or simply
-   tell the assistant "yes, buy 10 of it" once it's proposed a specific idea.
+4. **Act on it** in the Trade Terminal — pick Intraday or Delivery, place a manual order or run
+   an execution algorithm — against your real, connected Angel One account. Or just tell the
+   assistant "buy 10 of it" (or "invest ₹5,000 in it") once it's proposed a specific idea; it will
+   ask for whatever's still missing (size, Intraday/Delivery, market vs. limit vs. algo) before
+   placing anything.
 5. Every trade — from the terminal or from chat — is checked against your live wallet balance
    before it's sent, so you're told plainly if you're short, instead of finding out at the broker.
 
@@ -149,9 +155,10 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-> Live/broker trading requires an Angel One SmartAPI key, client code, PIN, and TOTP secret,
-> configured per-user from the Trade Terminal's "Connect Broker" panel. PAPER mode works out of
-> the box with no broker credentials.
+> Trading requires an Angel One SmartAPI key, client code, PIN, and TOTP secret, configured
+> per-user from the Trade Terminal's "Connect Broker" panel — there is currently no simulated
+> mode, so every credential you connect is a real, live account and every confirmed order (from
+> the terminal or from chat) is a real order.
 
 ## 10. Demo
 
@@ -164,10 +171,21 @@ streamlit run app.py
   returned, and is explicitly instructed to say "I don't know" rather than fill gaps.
 - **Safe autonomy.** Letting an AI *recommend* trades is useful; letting it *execute* them
   unattended is a real-money risk. We solved this with an explicit, non-bypassable
-  human-confirmation gate and a PAPER-by-default execution path.
+  human-confirmation gate that must cover size, product type, and execution style before any
+  order reaches the broker.
 - **Real-time feel in a server-rendered app.** Streamlit reruns the whole script on most
   interactions; we used fragment-scoped reruns for autocomplete/search so it feels closer to a
   native app instead of round-tripping the whole page per keystroke.
+- **One message, more than one specialist, one real order.** Because the router can (correctly)
+  match a single message to more than one domain agent — e.g. a trade confirmation matching both
+  the Equity desk and the Quant desk — and those agents run in parallel, both could independently
+  see the same confirmation and place the same real order. A prompt instruction telling agents
+  "don't call this twice" wasn't reliable enough on its own for something that moves real money,
+  so trade placement is now additionally guarded by a per-turn lock: `place_trade_order` can
+  execute at most once per user message, no matter how many agents or tool-call rounds attempt
+  it. Routing was also tightened so a trade-execution message resolves to exactly one specialist
+  in the first place — the lock is the actual guarantee, the routing fix just avoids the wasted
+  duplicate LLM call.
 
 ## 12. What's Next
 
